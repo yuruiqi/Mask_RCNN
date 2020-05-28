@@ -1,7 +1,7 @@
 import tensorflow as tf
 import torch
 import torch.nn as nn
-
+import Utils
 
 # ResNet
 class ResBlock(nn.Module):
@@ -147,7 +147,7 @@ class FPN(nn.Module):
 class RPN(nn.Module):
     """
     Construct Region Proposal Network.
-    input: [batch, channels, height, width], a feature map from P2 to P6 in turn
+    input: (batch, channels, height, width), a feature map from P2 to P6 in turn
     return: [rpn_class_logits, rpn_probs, rpn_bbox], the score and delta of every anchors
     """
     def __init__(self, in_channels, anchor_stride=1, anchors_per_location=9):
@@ -165,24 +165,26 @@ class RPN(nn.Module):
     def forward(self, x):
         """
         Returns:
-            rpn_class_logits: [batch, H * W * anchors_per_location, 2] Anchor classifier logits (before softmax)
-            rpn_probs: [batch, H * W * anchors_per_location, 2] Anchor classifier probabilities.
-            rpn_bbox: [batch, H * W * anchors_per_location, 4] Deltas (dy, dx, log(dh), log(dw))
+            rpn_class_logits: (batch, H * W * anchors_per_location, 2) Anchor classifier logits (before softmax)
+            rpn_probs: (batch, H * W * anchors_per_location, 2) Anchor classifier probabilities.
+            rpn_bbox: (batch, H * W * anchors_per_location, 4) Deltas (dy, dx, log(dh), log(dw))
                      to be applied to anchors.
+            H will be H/anchor_stride is anchor_stride is not 1. Same to W.
         """
         shared = self.conv_share(x)
 
-        # Anchor Score. [batch, height, width, anchors per location * 2]
+        # Anchor Score. (batch, height, width, anchors per location * 2)
         rpn_class_logits = self.conv_class(shared)
         # Reshape to [batch, anchors, 2]
         rpn_class_logits = rpn_class_logits.reshape([rpn_class_logits.shape[0], -1, 2])
         # Softmax on last dimension of BG/FG.
         rpn_probs = nn.functional.softmax(rpn_class_logits)
 
-        # Bounding box refinement delta. [batch, H, W, anchors per location * depth]
+        # Bounding box refinement delta. (batch, height, width, anchors per location * 4)
         # the four elements means [x, y, log(w), log(h)]
         rpn_bbox = self.conv_bbox(shared)
-        # Reshape to [batch, anchors, 4]
+        # Reshape to (batch, anchors, 4).
+        # The anchors is arranged in order of anchor_n, transverse, longitude. More information in Note.docx
         rpn_bbox = rpn_bbox.reshape([rpn_bbox.shape[0], -1, 4])
         return [rpn_class_logits, rpn_probs, rpn_bbox]
 
@@ -193,14 +195,15 @@ def proposal_layer(anchors, scores, deltas):
     Receives anchor scores and selects a subset to pass as proposals to the second stage. Filtering is done based on
     anchor scores and non-max suppression to remove overlaps. It also applies bounding box refinement deltas to anchors.
 
-    anchors: [batch, num_anchors, (y1, x1, y2, x2)] anchors in normalized coordinates
-    scores: [batch, num_anchors, (bg prob, fg prob)]
-    deltas: [batch, num_anchors, (dy, dx, log(dh), log(dw))]
+    The num_anchors is calculated by sigma(Pn_H * Pn_W * anchors_per_pixel).
+    The anchors is arranged in order of
+
+    anchors: (batch, num_anchors, (y1, x1, y2, x2)) anchors in normalized coordinates
+    scores: (batch, num_anchors, (bg prob, fg prob))
+    deltas: (batch, num_anchors, (dy, dx, log(dh), log(dw)))
 
     return:
     """
-
-
 
 
 # Mask R-CNN
@@ -219,7 +222,21 @@ class MRCNN(nn.Module):
 
         layer_outputs = []
         for p in rpn_feature_maps:
+            # layer_outputs [[logits1, probs1, bbox1], [logits2, probs2, bbox2], ...]
             layer_outputs.append(self.rpn(p))
+
+        # outputs: [[logits1, logits2, ...], [probs1, probs2, ...], [bbox1, bbox2, ...]]
+        outputs = list(zip(*layer_outputs))
+        # Concatenate the logits of different pyramid feature maps on axis 1.
+        # e.g. every logits's shape is (batch, n_anchors, 2).
+        # outputs: [logits_all, probs_all, bbox_all]
+        outputs = [tf.concat(x, axis=1) for x in outputs]
+
+        pyramid_shapes = [x.shape for x in rpn_feature_maps]
+        # TODO: comprehend of feature stride(relative to BACKBONE_STRIDES in config) the meaning and rewrite.
+        feature_stride = [4, 8, 16, 32, 64]
+        anchor_genertor = Utils.AnchorGenerator(scales=[32, 64, 96], ratios=[0.5, 1, 1])
+        anchors = anchor_genertor.get_anchors(pyramid_shapes, feature_stride)
 
         return layer_outputs
 

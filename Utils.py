@@ -3,6 +3,9 @@ import math
 
 
 class AnchorGenerator:
+    """
+    To generate anchors according to ratios, scales and pyramid sizes.
+    """
     def __init__(self, scales, ratios):
         """
         scales: tuple (scale1, scale2, ...). It means the area of the anchor will be scale^2.
@@ -77,6 +80,8 @@ class AnchorGenerator:
         y_count, x_count = pyramid_shape
 
         anchors = []
+        # Note that pyramid anchors should be arranged in order of anchors, transverse, longitude. So the loop order
+        # should be base_anchors, x, y.
         for y in range(0, y_count, anchor_stride):
             for x in range(0, x_count, anchor_stride):
                 # feature_stride*(x,y) means the center coordinates of the target anchors. So to every single pixel on
