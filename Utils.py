@@ -48,7 +48,7 @@ class AnchorGenerator:
         for scale in self.scales:
             for ratio in self.ratios:
                 anchors.append(self._generate_1_anchor(scale, ratio))
-        anchors = np.asarray(anchors)
+        anchors = np.asarray(anchors, dtype=np.float32)
 
         return anchors
 
@@ -161,6 +161,7 @@ def clip_boxes(boxes, window):
     return clipped_box
 
 
+# Batch slice operation
 def batch_slice(inputs, graph_fn):
     """
     Some functions cannot processed on different batch slices separately. We need to split the batch and operate on each
@@ -192,6 +193,79 @@ def batch_slice(inputs, graph_fn):
     return result
 
 
+# Remove zero paddings
+def trim_zero_graph(boxes):
+    """
+    Remove the zero paddings of the boxes.
+
+    boxes: (N, 4)
+    return:
+        boxes: (n, 4)
+        non_zeros_ix: (n). Indices of the non-zeros.
+    """
+    # If the sum of all the abs(coordinates) is zero, it's zero padding.
+    non_zeros = torch.sum(torch.abs(boxes), dim=1)
+    non_zeros_ix = torch.nonzero(non_zeros, as_tuple=False).squeeze(1)
+    boxes = torch.index_select(boxes, dim=0, index=non_zeros_ix)
+    return boxes, non_zeros_ix
+
+
+# Compute overlaps
+def overlaps_graph(boxes1, boxes2):
+    """
+    Computes IoU overlaps between two sets of boxes.
+    boxes1: (N1, [b1_y1, b1_x1, b1_y2, b1_x2])
+    boxes2: (N2, [b2_y1, b2_x1, b2_y2, b2_x2])
+
+    return: (N1, N2)
+    """
+    overlaps = []
+    for i in range(boxes1.shape[0]):
+        box1 = boxes1[i]
+        overlaps_box1 = []
+        for j in range(boxes2.shape[0]):
+            box2 = boxes2[j]
+            iou = compute_iou(box1, box2)
+            overlaps_box1.append(iou)
+        overlaps.append(overlaps_box1)
+    overlaps = torch.tensor(overlaps)
+    return overlaps
+
+
+def compute_iou(box1, box2):
+    """
+    Compute IoU between two boxes.
+
+    box1: [b1_y1, b1_x1, b1_y2, b1_x2]
+    box2: [b2_y1, b2_x1, b2_y2, b2_x2]
+    :return:
+    """
+    # Compute intersection
+    b1_y1, b1_x1, b1_y2, b1_x2 = torch.split(box1, 1)
+    b2_y1, b2_x1, b2_y2, b2_x2 = torch.split(box2, 1)
+    y1 = torch.max(b1_y1, b2_y1)
+    x1 = torch.max(b1_x1, b2_x1)
+    y2 = torch.max(b1_y2, b2_y2)
+    x2 = torch.max(b1_x2, b2_x2)
+    intersection = torch.mul(torch.min(x2 - x1, torch.tensor([0], dtype=torch.float32)),
+                             torch.min(y2 - y1, torch.tensor([0], dtype=torch.float32)))
+
+    # Compute unions
+    b1_area = (b1_y2 - b1_y1) * (b1_x2 - b1_x1)
+    b2_area = (b2_y2 - b2_y1) * (b2_x2 - b2_x1)
+    union = b1_area + b2_area - intersection
+
+    iou = intersection / union
+    return iou
+
+
 if __name__ == '__main__':
-    ag = AnchorGenerator([32, ], [0.5, 1])
-    print((ag.get_anchors([(10, 10), (20, 20)], [16, 32])).shape)
+    # ag = AnchorGenerator([32, ], [0.5, 1])
+    # print((ag.get_anchors([(10, 10), (20, 20)], [16, 32])).shape)
+
+    a = torch.tensor([[0.1, 0.2, 0.3, 0.4],
+                      [0.5, 0.6, 0.7, 0.8],
+                      [0.9, 0.8, 0.7, 0.6]])
+    b = torch.tensor([[0.5, 0.5, 1, 1],
+                      [0.1, 0.2, 0.4, 0.5]])
+    print(overlaps_graph(a,b))
