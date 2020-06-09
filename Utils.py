@@ -1,7 +1,7 @@
 import numpy as np
 import math
 import torch
-
+import torch.nn as nn
 
 # Anchor Generator
 class AnchorGenerator:
@@ -100,7 +100,7 @@ def refine_boxes(anchors, deltas):
     anchors: (N, [y1, x1, y2, x2]). Anchors to update
     deltas: (N, [dy, dx, log(dh), log(dw)]). Refinements to apply
     """
-    # Convert to y, x, h, w
+    # Convert to h, w, y, x
     height = anchors[:, 2] - anchors[:, 0]
     width = anchors[:, 3] - anchors[:, 1]
     center_y = anchors[:, 0] + 0.5 * height
@@ -119,6 +119,37 @@ def refine_boxes(anchors, deltas):
     x2 = x1 + width
 
     result = torch.stack([y1, x1, y2, x2], dim=1)
+    return result
+
+
+# Compute deltas from boxes to gt boxes
+def compute_deltas(box, gt_box):
+    """
+    Compute deltas from boxes to corresponding gt boxes. It's a graph function.
+
+    box: (N, [y1, x1, y2, x2])
+    gt_box: (N, [y1, x2, y2, x2])
+
+    return: (N, [dy, dx, log(dh), log(dw)])
+    """
+    # Convert to h, w, y, x
+    height = box[:, 2] - box[:, 0]
+    width = box[:, 3] - box[:, 1]
+    center_y = box[:, 0] + 0.5 * height
+    center_x = box[:, 1] + 0.5 * width
+
+    gt_height = gt_box[:, 2] - gt_box[:, 0]
+    gt_width = gt_box[:, 3] - gt_box[:, 1]
+    gt_center_y = gt_box[:, 0] + 0.5 * gt_height
+    gt_center_x = gt_box[:, 1] + 0.5 * gt_width
+
+    # Compute deltas
+    dy = (gt_center_y - center_y) / height
+    dx = (gt_center_x - center_x) / width
+    dh = torch.log(gt_height / height)
+    dw = torch.log(gt_width / width)
+
+    result = torch.stack([dy, dx, dh, dw], dim=1)
     return result
 
 
@@ -185,11 +216,18 @@ def batch_slice(inputs, graph_fn):
         # apply graph function
         output_slice = graph_fn(*inputs_slice)
         # Avoid error when torch.stack
-        # if not isinstance(output_slice, (tuple, list)):
-        #         #     output_slice = [output_slice]
+        if not isinstance(output_slice, (tuple, list)):
+                    output_slice = [output_slice]
         outputs.append(output_slice)
 
-    result = torch.stack(outputs, dim=0)
+    # [(output1_b1, output2_b1, ...), (output1_b2, output2_b2, ...), ...] to
+    # [(output1_b1, output1_b2, ...), (output2_b1, output1_b2, ...), ...]
+    outputs = list(zip(*outputs))
+    result = [torch.stack(x, dim=0) for x in outputs]
+
+    if len(result) == 1:
+        result = result[0]
+
     return result
 
 
@@ -257,6 +295,32 @@ def compute_iou(box1, box2):
 
     iou = intersection / union
     return iou
+
+
+# a function from Internet
+class TimeDistributed(nn.Module):
+    def __init__(self, module, batch_first=False):
+        super(TimeDistributed, self).__init__()
+        self.module = module
+        self.batch_first = batch_first
+
+    def forward(self, x):
+
+        if len(x.size()) <= 2:
+            return self.module(x)
+
+        # Squash samples and timesteps into a single axis
+        x_reshape = x.contiguous().view(-1, x.size(-1))  # (samples * timesteps, input_size)
+
+        y = self.module(x_reshape)
+
+        # We have to reshape Y
+        if self.batch_first:
+            y = y.contiguous().view(x.size(0), -1, y.size(-1))  # (samples, timesteps, output_size)
+        else:
+            y = y.view(-1, x.size(1), y.size(-1))  # (timesteps, samples, output_size)
+
+        return y
 
 
 if __name__ == '__main__':

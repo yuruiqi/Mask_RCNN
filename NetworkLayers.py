@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from FunctionLayers import PyramidROIAlign
+import Utils
 
 
 # ResNet
@@ -185,3 +187,114 @@ class RPN(nn.Module):
         # The anchors is arranged in order of anchor_n, transverse, longitude. More information in Note.docx
         rpn_bbox = rpn_bbox.reshape([rpn_bbox.shape[0], -1, 4])
         return [rpn_class_logits, rpn_probs, rpn_bbox]
+
+
+################################
+# Feature Pyramid Network Heads
+################################
+class FPNClassifier(nn.Module):
+    def __init__(self, in_channel, n_classes, fc_layers_size, pool_size, image_shape):
+        """
+        in_channel: int. The out channel of FPN.
+        n_classes: int. Number of classes.
+        fc_layers_size: int. The size of the fully connected layer.
+        pool_size: int. Pooling size of pyramid roi align.
+        image_shape: [h, w]. The shape of original image.
+        """
+        super().__init__()
+        self.pool_size = pool_size
+        self.image_shape = image_shape
+        self.num_classes = n_classes
+        self.pyramid_roi_align = PyramidROIAlign(pool_size, image_shape)
+
+        self.conv1 = nn.Sequential(nn.Conv2d(in_channel, fc_layers_size, kernel_size=pool_size),
+                                   nn.BatchNorm2d(fc_layers_size),
+                                   nn.ReLU())
+        self.conv2 = nn.Sequential(nn.Conv2d(fc_layers_size, fc_layers_size, kernel_size=1),
+                                   nn.BatchNorm2d(fc_layers_size),
+                                   nn.ReLU())
+        self.dense_logits = nn.Linear(fc_layers_size, n_classes)
+        self.dense_bbox = nn.Linear(fc_layers_size, n_classes*4)
+
+    def forward(self, rois, feature_maps):
+        """
+        rois: (batch, n_rois, [y1, x1, y2, x2]). Proposal boxes in normalized coordinates.
+        feature_maps: [p2, p3, p4, p5], Each is (batch, channels, h, w). Note h and w is different among feature maps.
+
+        return:
+            logits: (batch, n_rois, n_classes) classifier logits (before softmax)
+            probs: (batch, n_rois, n_classes) classifier probabilities
+            bbox_deltas: (batch, n_rois, n_classes, [dy, dx, log(dh), log(dw)]) Deltas to apply to proposal boxes.
+        """
+        # ROI Polling. (batch, num_rois, channels, pool_size, pool_size)
+        x = self.pyramid_roi_align.process(rois, feature_maps)
+
+        # TODO: Make sure that batch_slice is equal to TimeDistributed
+        # Share weights among dim "num_rois".
+        x = Utils.batch_slice(x, self.conv1)
+        x = Utils.batch_slice(x, self.conv2)
+        # (batch, num_rois, fc_layers_size, 1, 1) to (batch, num_rois, fc_layers_size)
+        shared = torch.squeeze(torch.squeeze(x, dim=4), dim=3)
+
+        # Classifier head
+        mrcnn_class_logits = Utils.batch_slice(shared, self.dense_logits)
+        mrcnn_probs = Utils.batch_slice(mrcnn_class_logits, nn.Softmax())
+
+        # BBox head
+        mrcnn_bbox = Utils.batch_slice(shared, self.dense_bbox)
+        # [batch, num_rois, NUM_CLASSES * (dy, dx, log(dh), log(dw))] to
+        # [batch, num_rois, NUM_CLASSES, (dy, dx, log(dh), log(dw))]
+        shape = mrcnn_bbox.shape[:2] + (self.num_classes, 4)
+        mrcnn_bbox = torch.reshape(mrcnn_bbox, shape)
+
+        return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox
+
+
+class FPNMask(nn.Module):
+    def __init__(self, in_channel, n_classes, pool_size, image_shape):
+        """
+        in_channel: int. The out channel of FPN.
+        n_classes: int. Number of classes.
+        pool_size: int. Pooling size of pyramid roi align.
+        image_shape: [h, w]. The shape of original image.
+        """
+        super().__init__()
+        self.pool_size = pool_size
+        self.image_shape = image_shape
+        self.num_classes = n_classes
+        self.pyramid_roi_align = PyramidROIAlign(pool_size, image_shape)
+
+        # TODO: Maybe I can change the out channels. Or use U-Net.
+        self.conv1 = nn.Sequential(nn.Conv2d(in_channel, 256, kernel_size=3, padding=1),
+                                   nn.BatchNorm2d(256),
+                                   nn.ReLU())
+        self.conv2 = nn.Sequential(nn.Conv2d(256, 256, kernel_size=3, padding=1),
+                                   nn.BatchNorm2d(256),
+                                   nn.ReLU())
+        self.conv3 = nn.Sequential(nn.Conv2d(256, 256, kernel_size=3, padding=1),
+                                   nn.BatchNorm2d(256),
+                                   nn.ReLU())
+        self.conv4 = nn.Sequential(nn.Conv2d(256, 256, kernel_size=3, padding=1),
+                                   nn.BatchNorm2d(256),
+                                   nn.ReLU())
+        self.deconv = nn.Sequential(nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
+                                    nn.ReLU())
+        self.conv1x1 = nn.Sequential(nn.Conv2d(256, n_classes, kernel_size=1),
+                                     nn.Sigmoid())
+
+    def forward(self, rois, feature_maps):
+        """
+        rois: (batch, n_rois, [y1, x1, y2, x2]). Proposal boxes in normalized coordinates.
+        feature_maps: [p2, p3, p4, p5], Each is (batch, channels, h, w). Note h and w is different among feature maps.
+
+        return:(batch, num_rois, n_classes, pool_size*2, pool_size*2)
+        """
+        # ROI Polling. (batch, num_rois, channels, pool_size, pool_size)
+        x = self.pyramid_roi_align.process(rois, feature_maps)
+        x = Utils.batch_slice(x, self.conv1)
+        x = Utils.batch_slice(x, self.conv2)
+        x = Utils.batch_slice(x, self.conv3)
+        x = Utils.batch_slice(x, self.conv4)
+        x = Utils.batch_slice(x, self.deconv)
+        x = Utils.batch_slice(x, self.conv1x1)
+        return x
