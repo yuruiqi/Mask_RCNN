@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 
+
 # Anchor Generator
 class AnchorGenerator:
     """
@@ -249,7 +250,7 @@ def trim_zero_graph(boxes):
 
 
 # Compute overlaps
-def overlaps_graph(boxes1, boxes2):
+def compute_overlaps(boxes1, boxes2):
     """
     Computes IoU overlaps between two sets of boxes.
     boxes1: (N1, [b1_y1, b1_x1, b1_y2, b1_x2])
@@ -276,7 +277,7 @@ def compute_iou(box1, box2):
 
     box1: [b1_y1, b1_x1, b1_y2, b1_x2]
     box2: [b2_y1, b2_x1, b2_y2, b2_x2]
-    :return:
+    return: float
     """
     # Compute intersection
     b1_y1, b1_x1, b1_y2, b1_x2 = torch.split(box1, 1)
@@ -332,4 +333,4 @@ if __name__ == '__main__':
                       [0.9, 0.8, 0.7, 0.6]])
     b = torch.tensor([[0.5, 0.5, 1, 1],
                       [0.1, 0.2, 0.4, 0.5]])
-    print(overlaps_graph(a,b))
+    print(compute_overlaps(a, b))

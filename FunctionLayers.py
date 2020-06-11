@@ -109,7 +109,7 @@ class DetectionTargetLayer:
     def __init__(self, gt_class_ids, gt_boxes, gt_masks, proposal_positive_ratio, train_proposals_per_image,
                  mask_shape):
         """
-        gt_class_ids: ()
+        gt_class_ids: (batch, MAX_GT_INSTANCES)
         gt_boxes: (batch, MAX_GT_INSTANCES, [y1, x1, y2, x2]) in normalized coordinates.
         gt_masks: (batch, MAX_GT_INSTANCES, height, width) of boolean type
         proposal_positive_ratio: float. Percent of positive ROIs in all rois used to train classifier/mask heads.
@@ -151,7 +151,7 @@ class DetectionTargetLayer:
         gt_masks = torch.index_select(gt_masks, dim=0, index=non_zeros_ix)
 
         # Compute overlaps. overlaps (n_proposals, n_gt_boxes)
-        overlaps = Utils.overlaps_graph(proposals, gt_boxes)
+        overlaps = Utils.compute_overlaps(proposals, gt_boxes)
 
         # Determine positive and negative ROIs.
         # Get the max IoU of the proposal to all gt boxes.

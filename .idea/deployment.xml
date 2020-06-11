@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="203">
+  <component name="PublishConfigData" autoUpload="Always" serverName="47">
     <serverData>
       <paths name="203">
         <serverdata>
@@ -12,7 +12,7 @@
       <paths name="47">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/yuruiqi/PycharmProjects/learning/PI-RADS" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>

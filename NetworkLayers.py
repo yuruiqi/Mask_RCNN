@@ -251,18 +251,18 @@ class FPNClassifier(nn.Module):
 
 
 class FPNMask(nn.Module):
-    def __init__(self, in_channel, n_classes, pool_size, image_shape):
+    def __init__(self, in_channel, n_classes, mask_pool_size, image_shape):
         """
         in_channel: int. The out channel of FPN.
         n_classes: int. Number of classes.
-        pool_size: int. Pooling size of pyramid roi align.
+        mask_pool_size: int. Pooling size of pyramid roi align.
         image_shape: [h, w]. The shape of original image.
         """
         super().__init__()
-        self.pool_size = pool_size
+        self.mask_pool_size = mask_pool_size
         self.image_shape = image_shape
         self.num_classes = n_classes
-        self.pyramid_roi_align = PyramidROIAlign(pool_size, image_shape)
+        self.pyramid_roi_align = PyramidROIAlign(mask_pool_size, image_shape)
 
         # TODO: Maybe I can change the out channels. Or use U-Net.
         self.conv1 = nn.Sequential(nn.Conv2d(in_channel, 256, kernel_size=3, padding=1),
@@ -287,9 +287,9 @@ class FPNMask(nn.Module):
         rois: (batch, n_rois, [y1, x1, y2, x2]). Proposal boxes in normalized coordinates.
         feature_maps: [p2, p3, p4, p5], Each is (batch, channels, h, w). Note h and w is different among feature maps.
 
-        return:(batch, num_rois, n_classes, pool_size*2, pool_size*2)
+        return:(batch, num_rois, n_classes, mask_pool_size*2, mask_pool_size*2)
         """
-        # ROI Polling. (batch, num_rois, channels, pool_size, pool_size)
+        # ROI Polling. (batch, num_rois, channels, mask_pool_size, mask_pool_size)
         x = self.pyramid_roi_align.process(rois, feature_maps)
         x = Utils.batch_slice(x, self.conv1)
         x = Utils.batch_slice(x, self.conv2)
