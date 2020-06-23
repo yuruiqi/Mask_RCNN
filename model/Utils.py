@@ -108,10 +108,10 @@ def refine_boxes(anchors, deltas):
     center_x = anchors[:, 1] + 0.5 * width
 
     # Apply deltas
-    center_y += deltas[:, 0] * height
-    center_x += deltas[:, 1] * width
-    height *= torch.exp(deltas[:, 2])
-    width *= torch.exp(deltas[:, 3])
+    center_y = center_y + deltas[:, 0] * height
+    center_x = center_x + deltas[:, 1] * width
+    height = height * torch.exp(deltas[:, 2])
+    width = width * torch.exp(deltas[:, 3])
 
     # Convert back to y1, x1, y2, x2
     y1 = center_y - 0.5 * height
@@ -169,6 +169,23 @@ def norm_boxes(boxes, image_shape):
     scale = np.array([h-1, w-1, h-1, w-1])
     normalized_boxes = np.divide(boxes, scale)
     return normalized_boxes
+
+
+# Normalize boxes
+def denorm_boxes(boxes, image_shape):
+    # TODO: To shift?
+    #  Note: In pixel coordinates (y2, x2) is outside the box. But in normalized coordinates it's inside the box.
+    """
+    Convert boxes from pixel coordinates to normalized coordinates.
+    boxes: (N, [y1, x1, y2, x2]) in normalized coordinates
+    image_shape: [height, width]
+
+    return: (N, [y1, x1, y2, x2]) in pixel coordinates
+    """
+    h, w = image_shape
+    scale = np.array([h-1, w-1, h-1, w-1])
+    denormed_boxes = np.round(np.multiply(boxes, scale))
+    return denormed_boxes
 
 
 # Clip boxes
@@ -267,7 +284,7 @@ def compute_overlaps(boxes1, boxes2):
             iou = compute_iou(box1, box2)
             overlaps_box1.append(iou)
         overlaps.append(overlaps_box1)
-    overlaps = torch.tensor(overlaps)
+    overlaps = torch.tensor(overlaps).cuda()
     return overlaps
 
 
@@ -284,10 +301,10 @@ def compute_iou(box1, box2):
     b2_y1, b2_x1, b2_y2, b2_x2 = torch.split(box2, 1)
     y1 = torch.max(b1_y1, b2_y1)
     x1 = torch.max(b1_x1, b2_x1)
-    y2 = torch.max(b1_y2, b2_y2)
-    x2 = torch.max(b1_x2, b2_x2)
-    intersection = torch.mul(torch.min(x2 - x1, torch.tensor([0], dtype=torch.float32)),
-                             torch.min(y2 - y1, torch.tensor([0], dtype=torch.float32)))
+    y2 = torch.min(b1_y2, b2_y2)
+    x2 = torch.min(b1_x2, b2_x2)
+    intersection = torch.mul(torch.max(x2 - x1, torch.tensor([0], dtype=torch.float32).cuda()),
+                             torch.max(y2 - y1, torch.tensor([0], dtype=torch.float32).cuda()))
 
     # Compute unions
     b1_area = (b1_y2 - b1_y1) * (b1_x2 - b1_x1)

@@ -14,6 +14,7 @@ def normalize(data):
 def show(image_path, roi_path):
     image = sitk.GetArrayFromImage(sitk.ReadImage(image_path))
     image = normalize(np.transpose(image,[1,2,0]))
+    print(image.shape)
     roi = sitk.GetArrayFromImage(sitk.ReadImage(roi_path))
     roi = normalize(np.transpose(roi,[1,2,0]))
     Imshow3DArray(image, roi)

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import Utils
+from model import Utils
 
 
 def compute_rpn_class_loss(rpn_class_logits, rpn_match):
@@ -15,7 +15,7 @@ def compute_rpn_class_loss(rpn_class_logits, rpn_match):
     # Positive and Negative anchors contribute to the loss, but neutral anchors (match value = 0) don't.
     indices = torch.ne(rpn_match, 0)
     rpn_class_logits = rpn_class_logits[indices]
-    rpn_match = rpn_match[indices]
+    rpn_match = rpn_match[indices].cuda()
 
     loss = nn.functional.cross_entropy(rpn_class_logits, rpn_match.to(torch.long))
     return loss
@@ -105,7 +105,7 @@ def compute_mrcnn_mask_loss(pred_masks, target_masks, target_class_ids):
     # Merge batch and n_rois dim
     pred_masks = torch.reshape(pred_masks, (-1, pred_masks.shape[2], pred_masks.shape[3], pred_masks.shape[4]))  # (batch*n_rois,n_classes,h,w)
     target_masks = torch.reshape(target_masks, (-1, target_masks.shape[2], target_masks.shape[3]))  # (batch*n_rois,h,w)
-    target_class_ids = torch.reshape(target_class_ids, (-1,))  # (batch*n_rois,h, w, n_classes)
+    target_class_ids = torch.reshape(target_class_ids, (-1,))  # (batch*n_rois)
 
     # Only positive ROIs contribute to the loss. And only the right class_id of each ROI. Get their indices.
     positive_roi_ix = torch.squeeze(torch.nonzero(torch.gt(target_class_ids, 0)), dim=1)  # (n_positive). roi_index
@@ -115,7 +115,7 @@ def compute_mrcnn_mask_loss(pred_masks, target_masks, target_class_ids):
 
     # Gather the masks (predicted and true) that contribute to loss
     y_true = target_masks[positive_roi_ix]
-    y_pred = target_masks[indices[:, 0], indices[:, 1]]
+    y_pred = pred_masks[indices[:, 0], indices[:, 1]]
 
     if y_true.shape[0] > 0:
         loss = nn.functional.binary_cross_entropy(y_pred, y_true)
@@ -126,14 +126,36 @@ def compute_mrcnn_mask_loss(pred_masks, target_masks, target_class_ids):
     return loss
 
 
+def compute_rpn_loss(rpn_class_logits, rpn_bbox, rpn_match, target_rpn_bbox):
+    rpn_class_loss = compute_rpn_class_loss(rpn_class_logits, rpn_match)
+    rpn_bbox_loss = compute_rpn_bbox_loss(rpn_bbox, target_rpn_bbox, rpn_match)
+    loss = rpn_class_loss + rpn_bbox_loss
+
+    loss_dict = {'rpn_class_loss': rpn_class_loss.item(), 'rpn_bbox_loss':rpn_bbox_loss.item()}
+    return loss, loss_dict
+
+
+def compute_head_loss(pred_class_logits, pred_bbox, pred_masks,
+                      target_class_ids, target_bbox, target_masks, active_class_ids):
+    mrcnn_class_loss = compute_mrcnn_class_loss(pred_class_logits, target_class_ids, active_class_ids)
+    mrcnn_bbox_loss = compute_mrcnn_bbox_loss(pred_bbox, target_bbox, target_class_ids)
+    mrcnn_mask_loss = compute_mrcnn_mask_loss(pred_masks, target_masks, target_class_ids)
+    loss = mrcnn_class_loss + mrcnn_bbox_loss + mrcnn_mask_loss
+
+    loss_dict = {'mrcnn_class_loss': mrcnn_class_loss.item(), 'mrcnn_bbox_loss': mrcnn_bbox_loss.item(),
+                 'mrcnn_mask_loss': mrcnn_mask_loss.item()}
+    return loss, loss_dict
+
+
 def compute_loss(rpn_class_logits, rpn_bbox,
                 rpn_match, target_rpn_bbox,
                 pred_class_logits, pred_bbox, pred_masks,
                 target_class_ids, target_bbox, target_masks,
                 active_class_ids):
-    loss = compute_rpn_class_loss(rpn_class_logits, rpn_match)+\
-           compute_rpn_bbox_loss(rpn_bbox, target_rpn_bbox, rpn_match)+\
-           compute_mrcnn_class_loss(pred_class_logits, target_class_ids, active_class_ids)+\
-           compute_mrcnn_bbox_loss(pred_bbox, target_bbox, target_class_ids)+\
-           compute_mrcnn_mask_loss(pred_masks, target_masks, target_class_ids)
-    return loss
+    rpn_loss, rpn_loss_dict = compute_rpn_loss(rpn_class_logits, rpn_bbox, rpn_match, target_rpn_bbox)
+    head_loss, head_loss_dict = compute_head_loss(pred_class_logits, pred_bbox, pred_masks,
+                                                  target_class_ids, target_bbox, target_masks, active_class_ids)
+    loss = rpn_loss + head_loss
+
+    loss_dict = rpn_loss_dict.update(head_loss_dict)
+    return loss, loss_dict

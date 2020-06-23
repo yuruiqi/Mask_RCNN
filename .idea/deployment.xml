@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="47">
+  <component name="PublishConfigData" autoUpload="Always" serverName="203">
     <serverData>
       <paths name="203">
         <serverdata>
           <mappings>
-            <mapping deploy="/home/yuruiqi/PycharmProjects/PI-RADS" local="$PROJECT_DIR$" />
+            <mapping deploy="/PI-RADS" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>

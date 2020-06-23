@@ -65,7 +65,7 @@ def generate_data():
     array2, classes2, boxes2, masks2 = _GenerateCircle2()
     array = np.concatenate([array1, array2], axis=0)
     classes = np.concatenate([classes1, classes2], axis=0)
-    boxes = np.concatenate([boxes1, boxes2], axis=0)
+    boxes = np.concatenate([boxes1, boxes2], axis=0)/255.0
     masks = np.concatenate([masks1, masks2], axis=0)
 
     return array, classes, boxes, masks

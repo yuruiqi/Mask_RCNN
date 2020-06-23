@@ -1,9 +1,6 @@
 import torch
-import os
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
-import Utils
-from torch.autograd import Variable
+from model import Utils
 
 
 def build_rpn_targets(anchors, gt_boxes, rpn_train_anchors_per_image):
@@ -55,7 +52,7 @@ def build_rpn_targets(anchors, gt_boxes, rpn_train_anchors_per_image):
 
     # 2. Don't let negatives be more than (anchors - positives).
     ids = np.where(rpn_match == -1)[0]
-    extra = len(ids) - (rpn_train_anchors_per_image - torch.sum(rpn_match == 1))
+    extra = len(ids) - (rpn_train_anchors_per_image - torch.sum(rpn_match == 1)).cpu().detach().numpy()
     if extra > 0:
         # Rest the extra ones to neutral randomly.
         ids = np.random.choice(ids, extra, replace=False)
@@ -73,13 +70,13 @@ def build_rpn_targets(anchors, gt_boxes, rpn_train_anchors_per_image):
 
 
 if __name__ == '__main__':
-    from artifical_data import _GenerateCircle
-    image, classes, boxes, masks = _GenerateCircle()
+    from dataset.artifical_data import _GenerateCircle
+    from model import Visualization
 
-    image = torch.tensor(image)
-    classes = torch.tensor(classes)  # (n_classes)
-    boxes = torch.tensor(boxes, dtype=torch.float32)  # (n_classes, 4)
-    masks = torch.tensor(masks)
+    images, classes, boxes, masks = _GenerateCircle()
+
+    images = torch.tensor(images).cuda()
+    boxes = torch.tensor(boxes[0], dtype=torch.float32) # (n_classes, 4)
 
     pyramid_shapes = [[64, 64], [32, 32], [16, 16], [8, 8], [4, 4]]
     feature_strides = [4, 8, 16, 32, 64]
@@ -88,4 +85,19 @@ if __name__ == '__main__':
     anchors = torch.tensor(anchors, dtype=torch.float32)  # (n_anchors, 4)
 
     rpn_train_anchors_per_image = [256] * anchors.shape[0]
-    build_rpn_targets(anchors, boxes[0], rpn_train_anchors_per_image[0])
+    boxes = Utils.norm_boxes(boxes, images.shape[2:]).to(torch.float32).cuda()
+    anchors = Utils.norm_boxes(anchors, images.shape[2:]).to(torch.float32).cuda()
+    target_rpn_match, target_rpn_bbox = build_rpn_targets(anchors, boxes, rpn_train_anchors_per_image[0])
+
+    # remain only rpn_match==1
+    ix = torch.nonzero(torch.eq(target_rpn_match, 1))[:,0]
+    target_rpn_match = target_rpn_match[ix]
+    target_rpn_bbox = target_rpn_bbox[ix]
+    anchors = anchors[ix]
+
+    anchors = torch.unsqueeze(anchors, dim=0)
+    target_rpn_match = torch.unsqueeze(target_rpn_match, dim=0)
+    target_rpn_bbox = torch.unsqueeze(target_rpn_bbox, dim=0)
+
+    target_box = Utils.batch_slice([anchors, target_rpn_bbox], lambda x, y: Utils.refine_boxes(x, y))
+    Visualization.visualize_rpn_rois(images, target_box, target_rpn_match)
