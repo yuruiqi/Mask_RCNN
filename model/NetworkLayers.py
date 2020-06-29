@@ -131,9 +131,9 @@ class FPN(nn.Module):
     def forward(self, featuremaps):
         _, c2, c3, c4, c5 = featuremaps
         p5 = self.conv5_1(c5)
-        p4 = self.conv4_1(c4)
-        p4up = nn.Upsample(scale_factor=2)(p5)
-        # p4 = self.conv4_1(c4) + nn.Upsample(scale_factor=2)(p5)
+        # p4 = self.conv4_1(c4)
+        # p4up = nn.Upsample(scale_factor=2)(p5)
+        p4 = self.conv4_1(c4) + nn.Upsample(scale_factor=2)(p5)
         p3 = self.conv3_1(c3) + nn.Upsample(scale_factor=2)(p4)
         p2 = self.conv2_1(c2) + nn.Upsample(scale_factor=2)(p3)
 
@@ -150,8 +150,8 @@ class FPN(nn.Module):
 class RPN(nn.Module):
     """
     Construct Region Proposal Network.
-    input: (batch, channels, height, width), a feature map from P2 to P6 in turn
-    return: [rpn_class_logits, rpn_probs, rpn_bbox], the score and delta of every anchors
+    input: (batch, channels, height, width), a feature map from P2 to P6 in turn.
+    return: [rpn_class_logits, rpn_probs, rpn_bbox], the score and delta of every anchors.
     """
     def __init__(self, in_channels, anchor_stride=1, anchors_per_location=9):
         """
@@ -223,6 +223,8 @@ class FPNClassifier(nn.Module):
         self.dense_logits = nn.Linear(fc_layers_size, n_classes)
         self.dense_bbox = nn.Linear(fc_layers_size, n_classes*4)
 
+        self.vfm = {}
+
     def forward(self, rois, feature_maps):
         """
         rois: (batch, n_rois, [y1, x1, y2, x2]). Proposal boxes in normalized coordinates.
@@ -235,6 +237,7 @@ class FPNClassifier(nn.Module):
         """
         # ROI Polling. (batch, num_rois, channels, pool_size, pool_size)
         x = self.pyramid_roi_align.process(rois, feature_maps)
+        self.vfm['fpn_classifier_roi_align'] = x
 
         # TODO: Make sure that batch_slice is equal to TimeDistributed
         # Share weights among dim "num_rois".
@@ -300,6 +303,7 @@ class FPNMask(nn.Module):
         """
         # ROI Polling. (batch, num_rois, channels, mask_pool_size, mask_pool_size)
         x = self.pyramid_roi_align.process(rois, feature_maps)
+        self.vfm['fpn_mask_roi_align'] = x
         x = Utils.batch_slice(x, self.conv1)
         self.vfm['fpn_mask_conv1'] = x
         x = Utils.batch_slice(x, self.conv2)

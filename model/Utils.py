@@ -59,7 +59,7 @@ class AnchorGenerator:
         generate 1 anchor by 1 scale and ratio.
         Take the center of the receptive field on the origin image as origin.
 
-        return: [-w/2, -h/2, w/2, h/2] dtype=float. the coordinates of the bottom-left and upper-right point
+        return: [-h/2, -w/2, h/2, w/2] dtype=float. the coordinates of the bottom-left and upper-right point
         of the box ith size of w and h.
         """
         scale = float(scale)
@@ -69,7 +69,7 @@ class AnchorGenerator:
         w = scale / math.sqrt(ratio)
         h = ratio * w
 
-        return [-w/2, -h/2, w/2, h/2]
+        return [-h/2, -w/2, h/2, w/2]
 
     # generate pyramid anchors
     def _generate_pyramid_anchors(self, pyramid_shape, feature_stride, anchor_stride):
@@ -89,7 +89,7 @@ class AnchorGenerator:
             for x in range(0, x_count, anchor_stride):
                 # feature_stride*(x,y) means the center coordinates of the target anchors. So to every single pixel on
                 # the origin image, we can just shift the base n anchors to the target center to generate new anchors.
-                shift = feature_stride * np.array([x, y, x, y])
+                shift = feature_stride * np.array([y, x, y, x])
                 anchors.append(self.base_anchors + shift)
         anchors = np.concatenate(anchors, axis=0)
         return anchors
@@ -129,7 +129,7 @@ def compute_deltas(box, gt_box):
     Compute deltas from boxes to corresponding gt boxes. It's a graph function.
 
     box: (N, [y1, x1, y2, x2])
-    gt_box: (N, [y1, x2, y2, x2])
+    gt_box: (N, [y1, x1, y2, x2])
 
     return: (N, [dy, dx, log(dh), log(dw)])
     """

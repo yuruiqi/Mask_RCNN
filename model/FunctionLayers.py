@@ -15,13 +15,13 @@ class ProposalLayer:
     The anchors is arranged in order of anchors, transverse, longitude.
     """
 
-    def __init__(self, proposal_count, nms_threshold=0.5, pre_nms_limit=6000):
+    def __init__(self, post_nms_rois, nms_threshold=0.7, pre_nms_limit=6000):
         """
-        proposal_count: ROIs kept after non-maximum suppression. Default to be 1000.
-        nms_threshold:  Threshold of IOU to perform nms. Default to be 0.5.
+        post_nms_rois: ROIs kept after non-maximum suppression. Default to be 1000.
+        nms_threshold:  Threshold of IOU to perform nms. Boxes IoU > nm_threshold will be discarded. Default to be 0.7.
         pre_nms_limt: ROIs kept after tf.nn.top_k and before non-maximum suppression. Default to be 6000.
         """
-        self.proposal_count = proposal_count
+        self.proposal_count = post_nms_rois
         self.nms_threshold = nms_threshold
         self.pre_nms_limit = pre_nms_limit
 
@@ -56,7 +56,7 @@ class ProposalLayer:
     def nms(self, boxes, scores):
         """
         Operate non_maximal_suppresion on boxes.
-        boxes: (N, [y1, x1, y2, x2])
+        boxes: (N, [y1, x1, y2, x2]) in normalized coordinates.
         scores: (N, [fg_probs])
 
         return:  Remained boxes after nms.
@@ -136,9 +136,9 @@ class DetectionTargetLayer:
         gt_masks: (all_GT_instances, height, width). Ground truth masks of boolen type.
 
         return:
-            rois: (n, 4)
-            roi_gt_class_ids: (n)
-            deltas: (n, 4)
+            rois: (n, 4). With zero paddings.
+            roi_gt_class_ids: (n). With zero paddings.
+            deltas: (n, 4). With zero paddings.
             roi_gt_masks_minibox: (n, mask_h, mask_w)
         """
         # Remove zero padding
@@ -154,7 +154,7 @@ class DetectionTargetLayer:
         # Get the max IoU of the proposal to all gt boxes.
         proposal_iou_max, _ = torch.max(overlaps, dim=1)
         # Positive rois are those with >= 0.5 IoU with a GT box.
-        # Positive rois are those with < 0.5 IoU with every GT box.
+        # Negative rois are those with < 0.5 IoU with every GT box.
         positive_roi_bool = torch.gt(proposal_iou_max, torch.tensor([0.5], dtype=torch.float32).cuda())
         positive_ix = torch.nonzero(positive_roi_bool)
         negative_ix = torch.nonzero(~positive_roi_bool)
@@ -251,9 +251,10 @@ class DetectionLayer:
     """
     Return final detection boxes.
     """
-    def __init__(self, detection_max_instances=100):
+    def __init__(self, detection_max_instances=100, detection_nms_threshold=0.3):
         self.window = torch.tensor([0, 0, 1, 1], dtype=torch.float32).cuda()
         self.detection_max_instance = detection_max_instances
+        self.detection_nms_threshold = detection_nms_threshold
 
     def process(self, rois, mrcnn_class, mrcnn_bbox):
         """
@@ -275,22 +276,22 @@ class DetectionLayer:
         return: (detection_max_instance, [y1, x1, y2, x2, class_id, score])
         """
         # Best corresponding class to each roi.(from 0 to n_classes-1)
-        class_ids = torch.argmax(probs, dim=1)  # (N)
+        class_ids_from0 = torch.argmax(probs, dim=1)  # (N)
         # Best corresponding class scores and deltas.
-        class_scores = probs[torch.arange(class_ids.shape[0]), class_ids]  # (N)
-        deltas_specific = deltas[torch.arange(class_ids.shape[0]), class_ids, :]  # (N,4)
+        class_scores = probs[torch.arange(class_ids_from0.shape[0]), class_ids_from0]  # (N)
+        deltas_specific = deltas[torch.arange(class_ids_from0.shape[0]), class_ids_from0, :]  # (N,4)
 
         # Apply bounding box deltas TODO: deltas_specific * config.BBOX_STD_DEV?
         refined_rois = Utils.refine_boxes(rois, deltas_specific)
         refined_rois = Utils.clip_boxes(refined_rois, self.window)
 
         # Don't need to filter out background because don't have it. TODO: Confirm it.
-        keep = torch.nonzero(~torch.lt(class_ids, 0))[:, 0]  # (n)
+        keep = torch.nonzero(~torch.lt(class_ids_from0, 0))[:, 0]  # (n)
         # Omit filter out low confidence boxes. TODO: Confirm if it's appropriate.
 
         # Apply per-class NMS
         # 1. Prepare
-        pre_nms_class_ids = class_ids[keep]  # (n)
+        pre_nms_class_ids = class_ids_from0[keep]  # (n)
         pre_nms_scores = class_scores[keep]  # (n)
         pre_nms_rois = refined_rois[keep]  # (n,4)
         unique_pre_nms_class_ids = torch.unique(pre_nms_class_ids)  # (n_unique). set of the class ids.
@@ -306,7 +307,7 @@ class DetectionLayer:
             # Indices of ROIS of the given class
             ixs = torch.nonzero(torch.eq(pre_nms_class_ids, class_id))[:, 0]
             # Apply NMS. class_keep is the indice of the roi(after ixs index) after nms.
-            class_keep = ops.nms(pre_nms_rois[ixs], pre_nms_scores[ixs], iou_threshold=0.3)
+            class_keep = ops.nms(pre_nms_rois[ixs], pre_nms_scores[ixs], iou_threshold=self.detection_nms_threshold)
             # Because torch can't limit the proposal_count, it should be realized by myself.
             if class_keep.shape[0] > self.detection_max_instance:
                 class_keep = class_keep[0:self.detection_max_instance]  # because ops.nms has sorted it.
@@ -332,8 +333,9 @@ class DetectionLayer:
         top_ids = torch.topk(class_scores_keep, k=num_keep, sorted=True)[1]
 
         # Arrange output as (n_detections, [y1, x1, y2, x2, class_id, score])
+        # TODO: Need add class_id by 1 because class_id is in [0, n_class-1]?
         detections = torch.cat([refined_rois[keep],
-                                torch.unsqueeze(class_ids[keep].to(torch.float32), dim=1),
+                                class_ids_from0[keep].to(torch.float32).unsqueeze(dim=1) + 1,
                                 torch.unsqueeze(class_scores[keep], dim=1)], dim=1)
         # Pad with zeros. Negative padding_count will reduce detections number to detection_max_instance.
         padding_count = self.detection_max_instance - detections.shape[0]
@@ -354,16 +356,17 @@ class PyramidROIAlign:
 
         return: (batch, n_boxes, channels, pool_size, pool_size). Box feature maps applying pyramid ROI align.
         """
-        # Get boxes shapes
+        # Get boxes shapes.py
         y1, x1, y2, x2 = torch.split(boxes, 1, dim=2)
         h = y2 - y1
         w = x2 - x1
 
         # Equation 1 in the Feature Pyramid Networks paper.
         # Divides sqrt(image_area) because it's normalized coordinates here.
-        # e.g. a 224x224 ROI (in pixels) maps to P4
+        # e.g. a 224x224 ROI (in pixels) maps to P4.
+        # TODO: 224 for an ROI is to large. I change it to
         image_area = self.image_shape[0] * self.image_shape[1]
-        k = 4 + torch.log2(torch.sqrt(h * w)/(224.0/math.sqrt(image_area)))
+        k = 4 + torch.log2(torch.sqrt(h * w)/(80.0/math.sqrt(image_area)))
         # Should <=5 and >=2
         roi_level = torch.min(torch.tensor(5, dtype=torch.int32).cuda(),
                               torch.max(torch.tensor(2, dtype=torch.int32).cuda(), torch.round(k).to(torch.int32)))
@@ -380,14 +383,16 @@ class PyramidROIAlign:
             # Keep track of which box is mapped to which level. (n_level_boxes, [batch_indice, box_indice])
             box_to_level.append(ix)
 
-            # Box indices explaining which batch is belongs to for crop_and_resize. (n_level_boxes, [batch_indice])
+            # Box indices explaining which batch it belongs to for crop_and_resize. (n_level_boxes, [batch_indice])
             box_indices = torch.unsqueeze(ix[:, 0].to(torch.float32), dim=1)
 
             # TODO: Need to stop gradient propogation to ROI proposals?
+            # level_boxes.requires_grad = False
+            # box_indices.requires_grad = False
+
             # Crop and resize(ROI Align)
-            level_boxes_transformed = transform_coordianates(level_boxes, self.image_shape)
-            # roi_align = RoIAlign(self.pool_size, self.pool_size)
-            # pooled.append(roi_align(feature_maps[i], level_boxes_transformed, box_indices))
+            feature_map_shape = (feature_maps[i].shape[-2], feature_maps[i].shape[-1])
+            level_boxes_transformed = transform_coordianates(level_boxes, feature_map_shape)
             level_boxes_transformed = torch.cat([box_indices, level_boxes_transformed], dim=1)
             pooled.append(ops.roi_align(feature_maps[i], level_boxes_transformed, self.pool_size))
 

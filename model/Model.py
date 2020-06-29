@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
-from model import Utils, LossFunction
+from model import Utils, LossFunction, Visualization
 import numpy as np
-from model import LossFunction
 
 from model.NetworkLayers import ResNet, FPN, RPN, FPNClassifier, FPNMask
 from model.FunctionLayers import ProposalLayer, DetectionTargetLayer, DetectionLayer
@@ -32,19 +31,17 @@ class MRCNN(nn.Module):
         self.fpn = FPN(2048, 256)
         self.rpn = RPN(256)
 
-        self.proposal_layer = ProposalLayer(proposal_count=300, nms_threshold=0.5, pre_nms_limit=1000)
+        self.proposal_layer = ProposalLayer(post_nms_rois=300, nms_threshold=0.8, pre_nms_limit=1000)
         self.detection_target_layer = DetectionTargetLayer(gt_class_ids, gt_boxes, gt_masks,
                                                            proposal_positive_ratio=0.33, train_proposals_per_image=100,
                                                            mask_shape=[28, 28])
-        self.detection_layer = DetectionLayer(detection_max_instances=4)
+        self.detection_layer = DetectionLayer(detection_max_instances=10, detection_nms_threshold=0.5)
         # in channel = fpn out channel, out channel = num_classes
         self.fpn_classifier = FPNClassifier(256, 3, fc_layers_size=1024, pool_size=7, image_shape=image_shape)
         self.fpn_mask = FPNMask(256, 3, mask_pool_size=14, image_shape=image_shape)
 
         # Get when forwarding.
         self.anchors = None  # (batch, n_anchors, 4). Same among batch so don't need batch dim.
-        self.rpn_match = None  # TODO: can be deleted?
-        self.rpn_bbox = None
 
     def forward(self, x):
         """
@@ -104,20 +101,31 @@ class MRCNN(nn.Module):
         # 4. Proposal Layer
         rpn_rois = self.proposal_layer.process(anchors, rpn_scores, rpn_bboxes)
         self.vfm['rpn_rois'] = rpn_rois
-        self.vfm['rpn_logits'] = rpn_logits
-        self.vfm['rpn_scores'] = rpn_scores
 
         # 5. Train or Inference
         if self.mode == 'train':
             # TODO: Should reduce train_proposals_per_image to around 200. Set to 500 to avoid error when debugging.
             # DetectionTargetLayer
             rois, target_class_ids, target_bbox, target_mask = self.detection_target_layer.process(rpn_rois)
+            # visualize_box = Utils.batch_slice([rois, target_bbox], Utils.refine_boxes)
+            # Visualization.visualize_boxes(x, visualize_box, target_class_ids,
+            #                               save_dir='/home/yuruiqi/visualization/dtl_rois/', view_batch=0)
+            # Visualization.visualize_mask(target_mask.unsqueeze(dim=2), save_dir='/home/yuruiqi/visualization/dtl_mask/')
 
             # Network heads
             # (batch, n_rois, n_classes), (batch, n_rois, n_classes), (batch, n_rois, n_classes, 4)
             mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.fpn_classifier(rois, mrcnn_feature_maps)
+            self.vfm.update(self.fpn_classifier.vfm)
+            # Visualization.visualize_mask(self.vfm['fpn_classifier_roi_align'],
+            #                              save_dir=r'/home/yuruiqi/visualization/classifier_roi_align/', n_watch=10, n_class_watch=10)
+
             # (batch, n_rois, n_classes, pool_size*2, pool_size*2)
             mrcnn_mask = self.fpn_mask(rois, mrcnn_feature_maps)
+            self.vfm.update(self.fpn_mask.vfm)
+            # Visualization.visualize_mask(self.vfm['fpn_mask_roi_align'],
+            #                              save_dir=r'/home/yuruiqi/visualization/mask_roi_align/', n_watch=10,
+            #                              n_class_watch=10)
+
             return rpn_logits, rpn_scores, rpn_bboxes, \
                    mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask, \
                    target_class_ids, target_bbox, target_mask
@@ -134,6 +142,7 @@ class MRCNN(nn.Module):
             # (batch, detection_max_instance, n_classes, h_mask, w_mask)
             mrcnn_masks = self.fpn_mask(detection_boxes, mrcnn_feature_maps)
 
+            self.vfm.update(self.fpn_classifier.vfm)
             self.vfm.update(self.fpn_mask.vfm)
 
             return detection_boxes, detection_classes, detection_scores, mrcnn_masks
@@ -157,8 +166,9 @@ class MRCNN(nn.Module):
 
     def get_rpn_targets(self, rpn_train_anchors_per_image=256):
         """
-        Get rpn targets and save.
-        rpn_train_anchors_per_image: int.
+        Get rpn targets.
+
+        rpn_train_anchors_per_image: int. Num of anchors to get bbox. The left are zero padding.
 
         return:
             rpn_match: (batch, n_anchors). Matches between anchors and GT boxes.
@@ -167,9 +177,10 @@ class MRCNN(nn.Module):
         """
         # add batch dim
         rpn_train_anchors_per_image = [rpn_train_anchors_per_image] * self.anchors.shape[0]
-        self.rpn_match, self.rpn_bbox = Utils.batch_slice(
+        rpn_match, rpn_bbox = Utils.batch_slice(
             [self.anchors, self.gt_boxes, rpn_train_anchors_per_image], DataLoader.build_rpn_targets)
-        return self.rpn_match, self.rpn_bbox
+
+        return rpn_match, rpn_bbox
 
     def set_trainable(self, train_part='ALL'):
         """
@@ -198,14 +209,15 @@ class MRCNN(nn.Module):
                     para.requires_grad = True
 
         # All part train
-        if train_part == 'Head':
+        if train_part == 'All':
             for net in all_part:
                 for para in net.parameters():
                     para.requires_grad = True
 
-    def train_part(self, images, save_path, part, optimizer, epoch):
+    def train_part(self, images, save_path, part, lr, epoch):
         # TODO: Confirm the relation between require_grad and optim
         self.set_trainable(part)
+        optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=lr)
 
         min_loss = None
         for i in range(epoch):
@@ -214,6 +226,13 @@ class MRCNN(nn.Module):
             mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask, \
             target_class_ids, target_bbox, target_mask = self(images)
             target_rpn_match, target_rpn_bbox = self.get_rpn_targets()
+
+            # visualize amchors and target boxes and masks
+            # Visualization.visualize_boxes(images, self.anchors, save_dir='/home/yuruiqi/visualization/anchors/',
+            #                               view_batch=0, n_watch=200)
+            # Visualization.visualize_rpn_targets(images, self.anchors, target_rpn_bbox, target_rpn_match,
+            #                                     save_dir='/home/yuruiqi/visualization/target_rpn_box/', n_watch=50)
+            # Visualization.visualize_target_mask(target_mask, save_dir='/home/yuruiqi/visualization/target_mask/')
 
             # Compute Loss
             if part == 'RPN':
@@ -231,14 +250,17 @@ class MRCNN(nn.Module):
             else:
                 raise("My dear, 'part' should be 'RPN' or 'Head' or 'All'.")
 
-            # Optimize
             print(part, loss.item())
             print(loss_dict)
-            loss.backward()
-            optimizer.step()
-
             if (not min_loss) or loss < min_loss:
                 print('save')
                 min_loss = loss
                 torch.save(self.state_dict(), save_path)
             print('')
+
+            # Optimize
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+
