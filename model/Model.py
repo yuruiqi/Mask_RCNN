@@ -250,13 +250,22 @@ class MRCNN(nn.Module):
             else:
                 raise("My dear, 'part' should be 'RPN' or 'Head' or 'All'.")
 
+            # save model
             print(part, loss.item())
             print(loss_dict)
+            patience = 0
             if (not min_loss) or loss < min_loss:
                 print('save')
                 min_loss = loss
                 torch.save(self.state_dict(), save_path)
+                patience = 0
+            else:
+                patience += 1
             print('')
+
+            # patience break
+            if patience == 10:
+                break
 
             # Optimize
             optimizer.zero_grad()

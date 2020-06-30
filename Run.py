@@ -22,11 +22,17 @@ images, gt_class_ids, gt_masks, gt_boxes = shape_creator.get_data()
 mrcnn = MRCNN(1, image_shape, mode='train', gt_class_ids=gt_class_ids, gt_boxes=gt_boxes, gt_masks=gt_masks)
 
 # train
-model_path = r'/home/yuruiqi/PycharmProjects/PI-RADS/save/try2.pkl'
+# model_path = r'/home/yuruiqi/PycharmProjects/PI-RADS/save/try2.pkl'
+rpn_path = r'/home/yuruiqi/PycharmProjects/PI-RADS/save/try2_rpn.pkl'
+head_path = r'/home/yuruiqi/PycharmProjects/PI-RADS/save/try2_head.pkl'
 
 mrcnn = mrcnn.cuda()
 
 # mrcnn.load_state_dict(torch.load(model_path))
-# mrcnn.train_part(images, save_path=model_path, part='RPN', lr=0.01, epoch=200)
-mrcnn.load_state_dict(torch.load(model_path))
-mrcnn.train_part(images, save_path=model_path, part='Head', lr=0.001, epoch=200)
+mrcnn.train_part(images, save_path=rpn_path, part='RPN', lr=0.01, epoch=100)
+mrcnn.load_state_dict(torch.load(rpn_path))
+mrcnn.train_part(images, save_path=rpn_path, part='RPN', lr=0.001, epoch=100)
+mrcnn.load_state_dict(torch.load(rpn_path))
+mrcnn.train_part(images, save_path=head_path, part='Head', lr=0.01, epoch=100)
+mrcnn.load_state_dict(torch.load(head_path))
+mrcnn.train_part(images, save_path=head_path, part='Head', lr=0.001, epoch=100)

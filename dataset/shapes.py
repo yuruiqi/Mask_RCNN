@@ -2,14 +2,15 @@ import torch
 import numpy as np
 import random
 import matplotlib.pyplot as plt
-from model import Visualization
+from model import Visualization, Utils
+import os
 
 
 class ShapeCreator:
     def __init__(self, image_shape, batch_size):
         self.image_shape = image_shape  # [h, w]
         self.shape_dict = {'circle': 1, 'rectangular': 2, 'diamond': 3}
-        self.max_shape_per_img = 3
+        self.max_shape_per_img = 4
 
         self.canvas = np.zeros((batch_size, 1)+image_shape)  # (batch, channel, h, w)
         self.mask = np.zeros((batch_size, self.max_shape_per_img)+image_shape)  # (batch, max_shape_per_img, h, w)
@@ -25,12 +26,22 @@ class ShapeCreator:
         self.draw_circle((50,50), 20, intensity=1, batch=0, no=0)
         self.draw_rectangular((190,130), 30, 20, intensity=1, batch=0, no=1)
         self.draw_diamond((70,150), 15, intensity=1, batch=0, no=2)
+        self.draw_diamond((100,100), 15, intensity=1, batch=0, no=3)
 
         self.draw_circle((50,50), 20, intensity=1, batch=1, no=0)
+        self.draw_circle((80,90), 20, intensity=1, batch=1, no=1)
+        self.draw_rectangular((120,50), 20, 15, intensity=1, batch=1, no=2)
+        self.draw_diamond((50,150), 20, intensity=1, batch=1, no=3)
 
-        self.draw_rectangular((190,130), 30, 20, intensity=1, batch=2, no=0)
+        self.draw_circle((190,130), 20, intensity=1, batch=2, no=0)
+        self.draw_rectangular((100,130), 30, 20, intensity=1, batch=2, no=1)
+        self.draw_rectangular((190,30), 30, 20, intensity=1, batch=2, no=2)
+        self.draw_diamond((50,30), 30, intensity=1, batch=2, no=3)
 
-        self.draw_diamond((70,150), 15, intensity=1, batch=3, no=0)
+        self.draw_circle((100,150), 15, intensity=1, batch=3, no=0)
+        self.draw_rectangular((175,105), 15, 30, intensity=1, batch=3, no=1)
+        self.draw_diamond((60,85), 15, intensity=1, batch=3, no=2)
+        self.draw_circle((30,30), 15, intensity=1, batch=3, no=3)
 
     def generate_random_shape(self, seed=19970516):
         np.random.seed(seed)
@@ -70,7 +81,7 @@ class ShapeCreator:
         for y in range(self.image_shape[0]):
             for x in range(self.image_shape[1]):
                 if (y - center[0]) ** 2 + (x - center[1]) ** 2 < radius ** 2:
-                    self.canvas[batch, 0, y, x] = intensity
+                    self.canvas[batch, 0, y, x] += intensity
                     self.mask[batch, no, y, x] = 1
 
         box = [(center[0]-radius)/self.image_shape[0], (center[1]-radius)/self.image_shape[1],
@@ -92,7 +103,7 @@ class ShapeCreator:
         for y in range(self.image_shape[0]):
             for x in range(self.image_shape[1]):
                 if abs(y - center[0]) < half_height and abs(x - center[1]) < half_width:
-                    self.canvas[batch, 0, y, x] = intensity
+                    self.canvas[batch, 0, y, x] += intensity
                     self.mask[batch, no, y, x] = 1
         box = [(center[0]-half_height)/self.image_shape[0], (center[1]-half_width)/self.image_shape[1],
                (center[0]+half_height)/self.image_shape[0], (center[1]+half_width)/self.image_shape[1]]
@@ -114,7 +125,7 @@ class ShapeCreator:
         for y in range(self.image_shape[0]):
             for x in range(self.image_shape[1]):
                 if abs(y - center[0]) + abs(x - center[1]) < half_center_line:
-                    self.canvas[batch, 0, y, x] = intensity
+                    self.canvas[batch, 0, y, x] += intensity
                     self.mask[batch, no, y, x] = 1
         box = [(center[0]-half_center_line)/self.image_shape[0], (center[1]-half_center_line)/self.image_shape[1],
                (center[0]+half_center_line)/self.image_shape[0], (center[1]+half_center_line)/self.image_shape[1]]
@@ -135,12 +146,27 @@ class ShapeCreator:
             gt_masks = gt_masks.cuda()
         return images, gt_class_ids, gt_masks, gt_boxes
 
+    def visualize(self, save_dir):
+        boxes = Utils.denorm_boxes(self.boxes, self.canvas.shape[-2:])
+
+        for batch in range(boxes.shape[0]):
+            image = self.canvas[batch, 0]
+            for i in range(boxes.shape[1]):
+                box = boxes[batch, i]
+                class_id = int(round(self.class_ids[batch, i]))
+                mask = self.mask[batch, i]
+
+                save_path = os.path.join(save_dir, '{}_{}'.format(batch, i))
+                Visualization.visualize_1_box(image, box, name=str(class_id), mask=mask, save_path=save_path)
+
 
 if __name__ == '__main__':
-    shape_creator = ShapeCreator((256, 256), batch_size=1)
-    shape_creator.draw_circle((200, 50), 20, intensity=1, batch=0, no=0)
+    shape_creator = ShapeCreator((256, 256), batch_size=4)
+    shape_creator.generate_shape()
+    # shape_creator.draw_circle((200, 50), 20, intensity=1, batch=0, no=0)
     # shape_creator.draw_rectangular((100, 100), 30, 20, intensity=1, batch=0, no=1)
     # shape_creator.draw_diamond((150, 150), 15, intensity=1, batch=0, no=2)
+    shape_creator.visualize(r'/home/yuruiqi/visualization/rua/')
     images, gt_class_ids, gt_masks, gt_boxes = shape_creator.get_data()
 
-    Visualization.visualize_boxes(images, gt_boxes, save_dir=r'/home/yuruiqi/visualization/rua/')
+    # Visualization.visualize_boxes(images, gt_boxes, save_dir=r'/home/yuruiqi/visualization/rua/')

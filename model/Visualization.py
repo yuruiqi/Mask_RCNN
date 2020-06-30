@@ -28,22 +28,25 @@ def visualize_1_box(image, box, score=None,name='Unknow', mask=None, save_path=N
     plt.imshow(image)
     plt.gca().add_patch(plt_box)
 
-    if score:
-        score = float(score)
-        box_tag = '{} {:.2f}'.format(name, score)
-        plt.gca().text(x1, y1-5, box_tag, color='white', bbox={'facecolor':'green', 'alpha':1.0})
+    score = round(score, 2) if score else '/'
+    box_tag = '{} {}'.format(name, score)
+    plt.gca().text(x1, y1-8, box_tag, color='white', bbox={'facecolor':'green', 'alpha':1.0})
 
     if mask is not None:
         mask = np.where(mask>0.5, 1.0, 0.0)
-        mask = Image.fromarray(mask)
-        h = int(y2 - y1)
-        w = int(x2 - x1)
-        mask = torchvision.transforms.functional.resize(mask, (h, w))
+        if mask.shape != image.shape:
+            mask = Image.fromarray(mask)
+            h = int(y2 - y1)
+            w = int(x2 - x1)
+            mask = torchvision.transforms.functional.resize(mask, (h, w))
 
-        mask_on_image = np.zeros(image.shape)
-        mask_on_image[int(y1):int(y2), int(x1):int(x2)] = mask
+            mask_on_image = np.zeros(image.shape)
+            mask_on_image[int(y1):int(y2), int(x1):int(x2)] = mask
 
-        plt.contour(mask_on_image)
+            plt.contour(mask_on_image)
+        else:
+            plt.contour(mask)
+
 
     if save_path:
         plt.savefig(save_path)

@@ -364,9 +364,9 @@ class PyramidROIAlign:
         # Equation 1 in the Feature Pyramid Networks paper.
         # Divides sqrt(image_area) because it's normalized coordinates here.
         # e.g. a 224x224 ROI (in pixels) maps to P4.
-        # TODO: 224 for an ROI is to large. I change it to
+        # TODO: 224 for an ROI is to large. Maybe I can change it.
         image_area = self.image_shape[0] * self.image_shape[1]
-        k = 4 + torch.log2(torch.sqrt(h * w)/(80.0/math.sqrt(image_area)))
+        k = 4 + torch.log2(torch.sqrt(h * w)/(224.0/math.sqrt(image_area)))
         # Should <=5 and >=2
         roi_level = torch.min(torch.tensor(5, dtype=torch.int32).cuda(),
                               torch.max(torch.tensor(2, dtype=torch.int32).cuda(), torch.round(k).to(torch.int32)))
