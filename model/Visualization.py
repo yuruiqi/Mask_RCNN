@@ -10,7 +10,7 @@ import os
 #################
 # Visualize box
 #################
-def visualize_1_box(image, box, score=None,name='Unknow', mask=None, save_path=None):
+def visualize_1_box(image, box, score=None,name='Unknow', mask=None, save_path=None, show=False):
     """
     Show box on the image. Note that the box is in original coordiantes.
 
@@ -47,10 +47,12 @@ def visualize_1_box(image, box, score=None,name='Unknow', mask=None, save_path=N
         else:
             plt.contour(mask)
 
-
     if save_path:
         plt.savefig(save_path)
-    # plt.show()
+
+    if show:
+        plt.show()
+
     plt.figure()
 
 
@@ -189,6 +191,33 @@ def visualize_detection(images, boxes, scores=None, class_ids=None, masks=None,
             save_path = os.path.join(save_dir, '{}_{}.png'.format(batch, i_box)) if save_dir else None
             score = scores[batch, i_box] if (scores is not None) else None
             class_id = int(class_ids[batch, i_box]) if (class_ids is not None) else None
+
+            if class_id < 1:
+                continue
+
             mask = masks[batch, i_box, class_id-1] if (masks is not None) else None
 
             visualize_1_box(images[batch, 0], boxes[batch, i_box], score, str(class_id), mask, save_path=save_path)
+
+
+def visualize_dataset(images, boxes, class_ids, masks, save_dir):
+    if isinstance(images, torch.Tensor):
+        images = images.cpu().detach().numpy()
+    if isinstance(boxes, torch.Tensor):
+        boxes = boxes.cpu().detach().numpy()
+    if isinstance(class_ids, torch.Tensor):
+        class_ids = class_ids.cpu().detach().numpy()
+    if isinstance(masks, torch.Tensor):
+        masks = masks.cpu().detach().numpy()
+
+    boxes = Utils.denorm_boxes(boxes, images.shape[-2:])
+
+    for batch in range(boxes.shape[0]):
+        image = images[batch, 0]
+        for i in range(boxes.shape[1]):
+            box = boxes[batch, i]
+            class_id = int(round(class_ids[batch, i]))
+            mask = masks[batch, i]
+
+            save_path = os.path.join(save_dir, '{}_{}'.format(batch, i))
+            visualize_1_box(image, box, name=str(class_id), mask=mask, save_path=save_path)

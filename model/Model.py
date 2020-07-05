@@ -187,7 +187,7 @@ class MRCNN(nn.Module):
         train_part: str. 'RPN' or 'Head' or 'ALL'
         """
         rpn_part = [self.resnet, self.fpn, self.rpn]
-        head_part = [self.fpn_classifier, self.fpn_mask]
+        head_part = [self.resnet, self.fpn, self.fpn_classifier, self.fpn_mask]
         all_part = rpn_part + head_part
 
         # Only RPN part train
