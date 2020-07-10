@@ -20,12 +20,21 @@ def visualize_1_box(image, box, score=None,name='Unknow', mask=None, save_path=N
     name: str
     mask: (h, w)
     """
+    if isinstance(image, torch.Tensor):
+        image = image.cpu().detach().numpy()
+    if isinstance(box, torch.Tensor):
+        box = box.cpu().detach().numpy()
+    if isinstance(score, torch.Tensor):
+        score = score.cpu().detach().numpy()
+    if isinstance(mask, torch.Tensor):
+        mask = mask.cpu().detach().numpy()
+
     # [y1, x1, y2, x2] to [x1, y1, w, h]
     # print(box)
     y1, x1, y2, x2 = box.tolist()
     plt_box = plt.Rectangle((x1, y1), x2-x1, y2-y1, color='green', fill=False, linewidth=2)
 
-    plt.imshow(image)
+    plt.imshow(image, cmap='gray')
     plt.gca().add_patch(plt_box)
 
     score = round(score, 2) if score else '/'
@@ -98,10 +107,18 @@ def visualize_boxes(images, boxes, scores=None, class_ids=None, save_dir=None, v
 def visualize_rpn_targets(images, anchors, rpn_bbox, rpn_match, save_dir=None, view_batch=None, n_watch=None):
     target_rpn_box = Utils.batch_slice([anchors, rpn_bbox], Utils.refine_boxes)
 
-    ix = torch.eq(rpn_match, 1)
-    target_rpn_box = target_rpn_box[ix].reshape((target_rpn_box.shape[0], -1, 4))
+    image_shape = images.shape[2:]
 
-    visualize_boxes(images, target_rpn_box, save_dir=save_dir, view_batch=view_batch, n_watch=n_watch)
+    ix = torch.eq(rpn_match, 1)
+    target_rpn_box = target_rpn_box[ix]
+    images = torch.index_select(images, index=ix.nonzero()[:,0], dim=0).squeeze(dim=1)
+
+    if isinstance(target_rpn_box, torch.Tensor):
+        target_rpn_box = target_rpn_box.cpu().detach().numpy()
+    target_rpn_box = Utils.denorm_boxes(target_rpn_box, image_shape)
+
+    for i in range(images.shape[0]):
+        visualize_1_box(images[i], target_rpn_box[i],  save_path=os.path.join(save_dir, '{}.png'.format(i)))
 
 
 #################

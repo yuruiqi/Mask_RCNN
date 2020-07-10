@@ -19,7 +19,7 @@ shape_creator.generate_shape()
 images, gt_class_ids, gt_masks, gt_boxes = shape_creator.get_data()
 
 # model
-mrcnn = MRCNN(1, image_shape, mode='train', gt_class_ids=gt_class_ids, gt_boxes=gt_boxes, gt_masks=gt_masks)
+mrcnn = MRCNN(1, image_shape, mode='train')
 
 # train
 # model_path = r'/home/yuruiqi/PycharmProjects/Mask_RCNN/save/try2.pkl'
@@ -28,11 +28,25 @@ head_path = r'/home/yuruiqi/PycharmProjects/Mask_RCNN/save/try2_head.pkl'
 
 mrcnn = mrcnn.cuda()
 
+min_loss = None
 mrcnn.load_state_dict(torch.load(rpn_path))
-mrcnn.train_part(images, save_path=rpn_path, part='RPN', lr=0.01, epoch=100)
-mrcnn.load_state_dict(torch.load(rpn_path))
-mrcnn.train_part(images, save_path=rpn_path, part='RPN', lr=0.001, epoch=100)
-mrcnn.load_state_dict(torch.load(rpn_path))
-mrcnn.train_part(images, save_path=head_path, part='Head', lr=0.01, epoch=100)
-mrcnn.load_state_dict(torch.load(head_path))
-mrcnn.train_part(images, save_path=head_path, part='Head', lr=0.001, epoch=100)
+for epoch in range(1000):
+    loss, loss_dict = mrcnn.train_part(images, gt_class_ids, gt_boxes, gt_masks, part='RPN')
+    print('Epoch {}: loss:{}, {}'.format(epoch, loss.item(), loss_dict))
+
+    if (not min_loss) or loss < min_loss:
+        print('save')
+        min_loss = loss
+        torch.save(mrcnn.state_dict(), rpn_path)
+
+    optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, mrcnn.parameters()), lr=0.1)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    # mrcnn.load_state_dict(torch.load(rpn_path))
+    # mrcnn.train_part(images, gt_class_ids, gt_boxes, gt_masks, save_path=rpn_path, part='RPN', lr=0.001, epoch=100)
+    # mrcnn.load_state_dict(torch.load(rpn_path))
+    # mrcnn.train_part(images, gt_class_ids, gt_boxes, gt_masks, save_path=head_path, part='Head', lr=0.01, epoch=100)
+    # mrcnn.load_state_dict(torch.load(head_path))
+    # mrcnn.train_part(images, gt_class_ids, gt_boxes, gt_masks, save_path=head_path, part='Head', lr=0.001, epoch=100)

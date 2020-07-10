@@ -67,9 +67,9 @@ class ResNet(nn.Module):
         # stage 3
         self.stage3 = self.construct_stage(out_channels//8, out_channels//4, conv_stride=(2, 2), n_blocks=3)
         # stage 4
+        # block_num should be 5 for resnet50 and 22 for resnet101.
         self.stage4 = self.construct_stage(out_channels//4, out_channels//2, conv_stride=(2, 2), n_blocks=5)
         # stage 5
-        # block_num should be 5 for resnet50 and 22 for resnet101.
         self.stage5 = self.construct_stage(out_channels//2, out_channels, conv_stride=(2, 2), n_blocks=2)
 
     def construct_stage(self, in_channels, out_channels, conv_stride, n_blocks):
@@ -237,7 +237,7 @@ class FPNClassifier(nn.Module):
         """
         # ROI Polling. (batch, num_rois, channels, pool_size, pool_size)
         x = self.pyramid_roi_align.process(rois, feature_maps)
-        self.vfm['fpn_classifier_roi_align'] = x
+        # self.vfm['fpn_classifier_roi_align'] = x
 
         # TODO: Make sure that batch_slice is equal to TimeDistributed
         # Share weights among dim "num_rois".
@@ -303,17 +303,17 @@ class FPNMask(nn.Module):
         """
         # ROI Polling. (batch, num_rois, channels, mask_pool_size, mask_pool_size)
         x = self.pyramid_roi_align.process(rois, feature_maps)
-        self.vfm['fpn_mask_roi_align'] = x
+        # self.vfm['fpn_mask_roi_align'] = x
         x = Utils.batch_slice(x, self.conv1)
-        self.vfm['fpn_mask_conv1'] = x
+        # self.vfm['fpn_mask_conv1'] = x
         x = Utils.batch_slice(x, self.conv2)
-        self.vfm['fpn_mask_conv2'] = x
+        # self.vfm['fpn_mask_conv2'] = x
         x = Utils.batch_slice(x, self.conv3)
-        self.vfm['fpn_mask_conv3'] = x
+        # self.vfm['fpn_mask_conv3'] = x
         x = Utils.batch_slice(x, self.conv4)
-        self.vfm['fpn_mask_conv4'] = x
+        # self.vfm['fpn_mask_conv4'] = x
         x = Utils.batch_slice(x, self.deconv)
-        self.vfm['fpn_mask_deconv'] = x
+        # self.vfm['fpn_mask_deconv'] = x
         x = Utils.batch_slice(x, self.conv1x1)
-        self.vfm['fpn_mask_conv1x1'] = x
+        # self.vfm['fpn_mask_conv1x1'] = x
         return x

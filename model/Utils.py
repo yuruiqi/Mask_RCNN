@@ -1,7 +1,8 @@
-import numpy as np
-import math
 import torch
 import torch.nn as nn
+import numpy as np
+import math
+import time
 
 
 # Anchor Generator
@@ -275,17 +276,42 @@ def compute_overlaps(boxes1, boxes2):
 
     return: (N1, N2)
     """
-    overlaps = []
-    for i in range(boxes1.shape[0]):
-        box1 = boxes1[i]
-        overlaps_box1 = []
-        for j in range(boxes2.shape[0]):
-            box2 = boxes2[j]
-            iou = compute_iou(box1, box2)
-            overlaps_box1.append(iou)
-        overlaps.append(overlaps_box1)
-    overlaps = torch.tensor(overlaps).cuda()
+    # Areas of anchors and GT boxes
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+
+    # Compute overlaps to generate matrix [boxes1 count, boxes2 count]
+    # Each cell contains the IoU value.
+    overlaps = torch.zeros((boxes1.shape[0], boxes2.shape[0])).cuda()
+    for i in range(overlaps.shape[1]):
+        box2 = boxes2[i]
+        overlaps[:, i] = compute_iou_multi(box2, boxes1, area2[i], area1)
+
     return overlaps
+
+
+def compute_iou_multi(box1, boxes2, box1_area, boxes2_area):
+    """
+    Same to 'compute_iou'.
+    Note: the areas are passed in rather than calculated here for efficiency.
+    Calculate once in the caller to avoid duplicate work.
+
+    box1: [y1, x1, y2, x2]
+    boxes2: (n, [y1, x1, y2, x2])
+    box1_area: float. the area of 'box'
+    boxes2_area: (n)
+
+    :return:
+    """
+    # Calculate intersection areas
+    y1 = torch.max(box1[0], boxes2[:, 0])
+    y2 = torch.min(box1[2], boxes2[:, 2])
+    x1 = torch.max(box1[1], boxes2[:, 1])
+    x2 = torch.min(box1[3], boxes2[:, 3])
+    intersection = torch.max(x2 - x1, torch.tensor(0.0).cuda()) * torch.max(y2 - y1, torch.tensor(0.0).cuda())
+    union = box1_area + boxes2_area[:] - intersection[:]
+    iou = intersection / union
+    return iou
 
 
 def compute_iou(box1, box2):
@@ -315,39 +341,93 @@ def compute_iou(box1, box2):
     return iou
 
 
-# a function from Internet
-class TimeDistributed(nn.Module):
-    def __init__(self, module, batch_first=False):
-        super(TimeDistributed, self).__init__()
-        self.module = module
-        self.batch_first = batch_first
+# Get rpn targets (Not used yet)
+def compute_backbone_shapes(backbone_name, image_shape, feature_strides=[4, 8, 16, 32, 64]):
+    # Currently supports ResNet50 only
+    assert backbone_name in ["resnet50"]
 
-    def forward(self, x):
+    pyramid_shapes = [[int(math.ceil(image_shape[0] / stride)), int(math.ceil(image_shape[1] / stride))]
+                      for stride in feature_strides]
+    return pyramid_shapes
 
-        if len(x.size()) <= 2:
-            return self.module(x)
 
-        # Squash samples and timesteps into a single axis
-        x_reshape = x.contiguous().view(-1, x.size(-1))  # (samples * timesteps, input_size)
+def build_rpn_targets(anchors, gt_boxes, rpn_train_anchors_per_image=256):
+    """Given the anchors and GT boxes, compute overlaps and identify positive
+    anchors and deltas to refine them to match their corresponding GT boxes.
+    Note that only the anchor whose match is 1 or -1 has bbox. Others are zero paddings.
+    anchors: (n_anchors, [y1, x1, y2, x2])
+    gt_boxes: (n_classes, [y1, x1, y2, x2])
+    TODO: Note that it's written mistakenly in the original code.
+    return:
+        rpn_match: (n_anchors). Matches between anchors and GT boxes.
+        1 = positive anchor, -1 = negative anchor, 0 = neutral
+        rpn_bbox: (n_anchors, [dy, dx, log(dh), log(dw)]). Anchor bbox deltas.
+    """
+    if isinstance(anchors, np.ndarray):
+        anchors = torch.tensor(anchors, dtype=torch.float32).cuda()
+    if isinstance(gt_boxes, np.ndarray):
+        gt_boxes = torch.tensor(gt_boxes, dtype=torch.float32).cuda()
 
-        y = self.module(x_reshape)
+    # Added by myself. Eliminate zero padding gt boxes. So rpn_targets will not regress to there.
+    gt_boxes, _ = trim_zero_graph(gt_boxes)
 
-        # We have to reshape Y
-        if self.batch_first:
-            y = y.contiguous().view(x.size(0), -1, y.size(-1))  # (samples, timesteps, output_size)
-        else:
-            y = y.view(-1, x.size(1), y.size(-1))  # (timesteps, samples, output_size)
+    # Set all to neutral first.
+    rpn_match = torch.zeros([anchors.shape[0]], dtype=torch.int32)  # (n_anchors)
+    rpn_bbox = torch.zeros((anchors.shape[0], 4))  # (n_anchors, [dy, dx, log(dh), log(dw)])
 
-        return y
+    overlaps = compute_overlaps(anchors, gt_boxes)  # (n_anchors, n_classes)
+    # Match anchors to GT boxes
+    # If an anchor overlaps a GT box with IoU >= 0.7 then it's positive(1).
+    # If an anchor overlaps a GT box with IoU < 0.3 then it's negative(-1).
+    # Neutral(0) anchors are those that don't match the conditions above, and they don't influence the loss function.
+    # However, don't keep any GT box unmatched (rare, but happens).
+    # Instead, match it to the closest anchor (even if its max IoU is < 0.3).
+
+    # 1. Get matched IoU and index of the anchors. Set negative anchors.
+    anchor_iou_argmax = torch.argmax(overlaps, dim=1)  # (n_anchors), best matched gt_boxes of every anchor.
+    anchor_iou_max = torch.max(overlaps, dim=1)[0]  # (n_anchors), best matched overlaps of every anchor.
+    rpn_match[anchor_iou_max < 0.3] = -1
+
+    # 2. Set an anchor for each GT box (regardless of IoU value).
+    # If multiple anchors have the same IoU, then match all of them.
+    # index of all best anchors to gt boxes.
+    gt_iou_argmax = torch.nonzero(overlaps == torch.max(overlaps, dim=0)[0])[:, 0]
+    rpn_match[gt_iou_argmax] = 1
+
+    # 3. Set anchors with high overlap as positive. TODO: 0.7 maybe to high???
+    rpn_match[anchor_iou_max >= 0.7] = 1
+
+    # Subsample to balance positive and negative anchors.
+    # 1. Don't let positives be more than half the anchors.
+    # TODO: 1.Why?     2. Need to use torch instead of np?
+    ids = np.where(rpn_match == 1)[0]  # (n_positive)
+    extra = len(ids) - rpn_train_anchors_per_image//2
+    if extra > 0:
+        # Reset the extra ones to neutral randomly.
+        ids = np.random.choice(ids, extra, replace=False)
+        rpn_match[ids] = 0
+
+    # 2. Don't let negatives be more than (anchors - positives).
+    ids = np.where(rpn_match == -1)[0]
+    extra = len(ids) - (rpn_train_anchors_per_image - torch.sum(rpn_match == 1)).cpu().detach().numpy()
+    if extra > 0:
+        # Rest the extra ones to neutral randomly.
+        ids = np.random.choice(ids, extra, replace=False)
+        rpn_match[ids] = 0
+
+    #  First compute deltas to the corresponding GT boxes.
+    not_positive_ids = torch.ne(rpn_match, 1)
+    anchor_gt_boxes = torch.index_select(gt_boxes, dim=0, index=anchor_iou_argmax)
+    rpn_bbox = compute_deltas(anchors, anchor_gt_boxes)
+    # TODO: Must do this?
+    # Then set not positive anchors' deltas to zero.
+    rpn_bbox[not_positive_ids] = 0
+
+    return rpn_match, rpn_bbox
 
 
 if __name__ == '__main__':
     # ag = AnchorGenerator([32, ], [0.5, 1])
     # print((ag.get_anchors([(10, 10), (20, 20)], [16, 32])).shape)
 
-    a = torch.tensor([[0.1, 0.2, 0.3, 0.4],
-                      [0.5, 0.6, 0.7, 0.8],
-                      [0.9, 0.8, 0.7, 0.6]])
-    b = torch.tensor([[0.5, 0.5, 1, 1],
-                      [0.1, 0.2, 0.4, 0.5]])
-    print(compute_overlaps(a, b))
+    print(compute_backbone_shapes("resnet50", [256, 256]))
