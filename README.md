@@ -1,5 +1,6 @@
 # Mask_RCNN
 Mask R-CNN model programmed by Pytorch.
+Not perfect yet. Still under revision.
 
 ## Data Form
 The input and output form of the model every batch.
