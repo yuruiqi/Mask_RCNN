@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from model.FunctionLayers import PyramidROIAlign
 from model import Utils
+from torchvision.models.resnet import ResNet, Bottleneck
 
 
 # ResNet
@@ -44,7 +45,7 @@ class ResBlock(nn.Module):
         return out
 
 
-class ResNet(nn.Module):
+class ResNet50(nn.Module):
     """
     Construct ResNet.
     Return: [C1, C2, C3, C4, C5]. feature maps with different depth
@@ -98,6 +99,34 @@ class ResNet(nn.Module):
         c3 = self.stage3(c2)
         c4 = self.stage4(c3)
         c5 = self.stage5(c4)
+        return [c1, c2, c3, c4, c5]
+
+
+# pretrain model from pytorch
+class ResNetPyTorch(ResNet):
+    def __init__(self, pretrained=False):
+        super().__init__(Bottleneck, [3, 4, 6, 3])
+        resnet50_path = '/home/yuruiqi/PycharmProjects/Mask_RCNN/save/resnet50-19c8e357.pth'
+
+        if pretrained:
+            self.load_state_dict(torch.load(resnet50_path))
+
+    def _forward_impl(self, x):
+        # See note [TorchScript super()]
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        c1 = self.maxpool(x)
+
+        c2 = self.layer1(c1)
+        c3 = self.layer2(c2)
+        c4 = self.layer3(c3)
+        c5 = self.layer4(c4)
+
+        # x = self.avgpool(x)
+        # x = torch.flatten(x, 1)
+        # x = self.fc(x)
+
         return [c1, c2, c3, c4, c5]
 
 

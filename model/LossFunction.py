@@ -150,7 +150,7 @@ def compute_head_loss(pred_class_logits, pred_bbox, pred_masks,
     mrcnn_class_loss = compute_mrcnn_class_loss(pred_class_logits, target_class_ids, active_class_ids)
     mrcnn_bbox_loss = compute_mrcnn_bbox_loss(pred_bbox, target_bbox, target_class_ids)
     mrcnn_mask_loss = compute_mrcnn_mask_loss(pred_masks, target_masks, target_class_ids)
-    loss = mrcnn_class_loss + mrcnn_bbox_loss + 100*mrcnn_mask_loss
+    loss = mrcnn_class_loss + mrcnn_bbox_loss + mrcnn_mask_loss
 
     loss_dict = {'mrcnn_class_loss': mrcnn_class_loss.item(), 'mrcnn_bbox_loss': mrcnn_bbox_loss.item(),
                  'mrcnn_mask_loss': mrcnn_mask_loss.item()}

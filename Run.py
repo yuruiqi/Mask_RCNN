@@ -28,25 +28,47 @@ head_path = r'/home/yuruiqi/PycharmProjects/Mask_RCNN/save/try2_head.pkl'
 
 mrcnn = mrcnn.cuda()
 
+############
+# Train RPN
+############
+# mrcnn.load_state_dict(torch.load(rpn_path))
+# mrcnn.set_trainable('RPN')
+# optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, mrcnn.parameters()), lr=0.001)
+#
+# mrcnn.train()
+# min_loss = None
+# for epoch in range(1000):
+#     optimizer.zero_grad()
+#     loss, loss_dict = mrcnn.train_part(images, gt_class_ids, gt_boxes, gt_masks, part='RPN')
+#     print('Epoch {}: loss:{}, {}'.format(epoch, loss.item(), loss_dict))
+#
+#     if (not min_loss) or loss < min_loss:
+#         print('save')
+#         min_loss = loss
+#         torch.save(mrcnn.state_dict(), rpn_path)
+#
+#     loss.backward()
+#     optimizer.step()
+
+############
+# Train Heads
+############
+# mrcnn.load_state_dict(torch.load(rpn_path))
+mrcnn.load_state_dict(torch.load(head_path))
+mrcnn.set_trainable('Heads')
+optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, mrcnn.parameters()), lr=0.001)
+
+mrcnn.train()
 min_loss = None
-mrcnn.load_state_dict(torch.load(rpn_path))
 for epoch in range(1000):
-    loss, loss_dict = mrcnn.train_part(images, gt_class_ids, gt_boxes, gt_masks, part='RPN')
+    optimizer.zero_grad()
+    loss, loss_dict = mrcnn.train_part(images, gt_class_ids, gt_boxes, gt_masks, part='Heads')
     print('Epoch {}: loss:{}, {}'.format(epoch, loss.item(), loss_dict))
 
     if (not min_loss) or loss < min_loss:
         print('save')
         min_loss = loss
-        torch.save(mrcnn.state_dict(), rpn_path)
+        torch.save(mrcnn.state_dict(), head_path)
 
-    optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, mrcnn.parameters()), lr=0.1)
-    optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-
-    # mrcnn.load_state_dict(torch.load(rpn_path))
-    # mrcnn.train_part(images, gt_class_ids, gt_boxes, gt_masks, save_path=rpn_path, part='RPN', lr=0.001, epoch=100)
-    # mrcnn.load_state_dict(torch.load(rpn_path))
-    # mrcnn.train_part(images, gt_class_ids, gt_boxes, gt_masks, save_path=head_path, part='Head', lr=0.01, epoch=100)
-    # mrcnn.load_state_dict(torch.load(head_path))
-    # mrcnn.train_part(images, gt_class_ids, gt_boxes, gt_masks, save_path=head_path, part='Head', lr=0.001, epoch=100)

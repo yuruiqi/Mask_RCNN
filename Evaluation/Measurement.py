@@ -106,7 +106,7 @@ def compute_class_ap(class_ap_list, n_all_gt_class):
             raise ValueError('Rua')
         precision.append(tp_acc/(tp_acc + fp_acc))
         recall.append(tp_acc/n_all_gt_class)
-    print(recall, precision)
+    # print(recall, precision)
     # Compute AP
     plt.plot(recall, precision)
     plt.show()

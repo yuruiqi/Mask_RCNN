@@ -98,10 +98,13 @@ def visualize_boxes(images, boxes, scores=None, class_ids=None, save_dir=None, v
     for batch in range(images.shape[0]):
         # box loop
         for i_box in range(n_watch):
-            save_path = os.path.join(save_dir, '{}_{}.png'.format(batch, i_box)) if save_dir else None
             score = scores[batch, i_box] if (scores is not None) else None
             class_id = str(int(class_ids[batch, i_box])) if (class_ids is not None) else None
-            visualize_1_box(images[batch, 0], boxes[batch, i_box], score, name=class_id, save_path=save_path)
+
+            for channel in range(images.shape[1]):
+                save_path = os.path.join(save_dir, 'batch{} i{} channel{}.png'.format(batch, i_box, channel)) \
+                    if save_dir else None
+                visualize_1_box(images[batch, channel], boxes[batch, i_box], score, name=class_id, save_path=save_path)
 
 
 def visualize_rpn_targets(images, anchors, rpn_bbox, rpn_match, save_dir=None, view_batch=None, n_watch=None):

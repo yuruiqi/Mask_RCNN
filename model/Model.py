@@ -3,11 +3,10 @@ import torch.nn as nn
 
 from model import Utils, Visualization
 from model import LossFunction
-from model.NetworkLayers import ResNet, FPN, RPN, FPNClassifier, FPNMask
+from model.NetworkLayers import ResNet50, ResNetPyTorch, FPN, RPN, FPNClassifier, FPNMask
 from model.FunctionLayers import ProposalLayer, DetectionTargetLayer, DetectionLayer
 
 import numpy as np
-import time
 
 
 # Mask R-CNN
@@ -26,7 +25,10 @@ class MRCNN(nn.Module):
         self.vfm = {}
 
         # TODO: parameter "training" of batchnorm need to be set. (May be some batchnorm hasn't be written.)
-        self.resnet = ResNet(in_channels, 2048)
+        # self.resnet = ResNet50(in_channels, 2048)
+        # TODO: channel
+        self.resnet = ResNetPyTorch(pretrained=True)
+
         self.fpn = FPN(2048, 256)
         self.rpn = RPN(256)
 
@@ -262,33 +264,27 @@ class MRCNN(nn.Module):
                                                            proposal_positive_ratio=0.33, train_proposals_per_image=100,
                                                            mask_shape=[28, 28])
 
-    def set_trainable(self, train_part):
+    def set_trainable(self, train_parts):
         """
-        train_part: str. 'RPN' or 'Head' or 'ALL' or None
+        train_part: list of 'Backbone' or 'RPN' or 'MRCNN'
         """
-        rpn_part = [self.resnet, self.fpn, self.rpn]
-        head_part = [self.resnet, self.fpn, self.fpn_classifier, self.fpn_mask]
-        all_part = rpn_part + head_part
+        # TODO: confirm
+        def set_bn_eval(m):
+            classname = m.__class__.__name__
+            if classname.find('BatchNorm') != -1:
+                m.eval()
+        self.apply(set_bn_eval)
 
-        # Only RPN part train
-        if train_part == 'RPN':
-            for net in rpn_part:
-                for para in net.parameters():
-                    para.requires_grad = True
-            for net in head_part:
-                for para in net.parameters():
-                    para.requires_grad = False
-        # Only Head part train
-        elif train_part == 'Head':
-            for net in rpn_part:
-                for para in net.parameters():
-                    para.requires_grad = False
-            for net in head_part:
-                for para in net.parameters():
-                    para.requires_grad = True
-        # All part train
-        elif train_part == 'All':
-            for net in all_part:
+        dict = {'Backbone':(self.resnet,), 'RPN':(self.fpn, self.rpn),
+                'MRCNN':(self.fpn, self.fpn_classifier, self.fpn_mask)}
+
+        # Set all to not train
+        for para in self.parameters():
+            para.requires_grad = False
+
+        for train_name in train_parts:
+            part = dict[train_name]
+            for net in part:
                 for para in net.parameters():
                     para.requires_grad = True
 
@@ -314,15 +310,18 @@ class MRCNN(nn.Module):
         if part == 'RPN':
             loss, loss_dict = LossFunction.compute_rpn_loss(rpn_logits, rpn_bboxes,
                                                             target_rpn_match, target_rpn_bbox)
-        elif part == 'Head':
+        elif part == 'MRCNN':
             loss, loss_dict = LossFunction.compute_head_loss(mrcnn_class_logits, mrcnn_bbox, mrcnn_mask,
                                                              target_class_ids, target_bbox, target_mask,
                                                              self.active_class_ids)
-        elif part == 'All':
+        elif part == 'Heads':
             loss, loss_dict = LossFunction.compute_loss(rpn_logits, rpn_bboxes, target_rpn_match, target_rpn_bbox,
                                                         mrcnn_class_logits, mrcnn_bbox, mrcnn_mask,
                                                         target_class_ids, target_bbox, target_mask,
                                                         self.active_class_ids)
         else:
-            raise ValueError("My dear, 'part' should be 'RPN' or 'Head' or 'All'.")
+            raise ValueError("Rua")
         return loss, loss_dict
+
+    def load_weight(self, path):
+        self.resnet.load_state_dict(torch.load(path))
