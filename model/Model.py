@@ -1,21 +1,26 @@
 import torch
 import torch.nn as nn
 
-from model import Utils, Visualization
-from model import LossFunction
+from model import Utils, Visualization, LossFunction
 from model.NetworkLayers import ResNet50, ResNetPyTorch, FPN, RPN, FPNClassifier, FPNMask
 from model.FunctionLayers import ProposalLayer, DetectionTargetLayer, DetectionLayer
 
 import numpy as np
+import os
+
+grads = Utils.GradSaver()
 
 
 # Mask R-CNN
 class MRCNN(nn.Module):
-    def __init__(self, in_channels, image_shape, mode):
+    def __init__(self, in_channels, image_shape, n_classes, mode, pretrain=True):
+        # TODO: in_channels
         super().__init__()
         self.mode = mode
         self.image_shape = image_shape
+        self.n_classes = n_classes
 
+        self.anchors = None
         self.gt_class_ids = None
         self.gt_boxes = None
         self.gt_masks = None
@@ -24,22 +29,19 @@ class MRCNN(nn.Module):
         # visualization feature map
         self.vfm = {}
 
-        # TODO: parameter "training" of batchnorm need to be set. (May be some batchnorm hasn't be written.)
         # self.resnet = ResNet50(in_channels, 2048)
         # TODO: channel
-        self.resnet = ResNetPyTorch(pretrained=True)
+        self.resnet = ResNetPyTorch(pretrained=pretrain)
 
         self.fpn = FPN(2048, 256)
         self.rpn = RPN(256)
 
         self.proposal_layer = ProposalLayer(post_nms_rois=300, nms_threshold=0.8, pre_nms_limit=1000)
-        # self.detection_target_layer = DetectionTargetLayer(self.gt_class_ids, self.gt_boxes, self.gt_masks,
-        #                                                    proposal_positive_ratio=0.33, train_proposals_per_image=100,
-        #                                                    mask_shape=[28, 28])
-        self.detection_layer = DetectionLayer(detection_max_instances=10, detection_nms_threshold=0.5)
+        self.detection_target_layer = None
+        self.detection_layer = DetectionLayer(detection_max_instances=10, detection_nms_threshold=0.7)
         # in channel = fpn out channel, out channel = num_classes
-        self.fpn_classifier = FPNClassifier(256, 3, fc_layers_size=1024, pool_size=7, image_shape=image_shape)
-        self.fpn_mask = FPNMask(256, 3, mask_pool_size=14, image_shape=image_shape)
+        self.fpn_classifier = FPNClassifier(256, n_classes, fc_layers_size=1024, pool_size=7, image_shape=image_shape)
+        self.fpn_mask = FPNMask(256, n_classes, mask_pool_size=14, image_shape=image_shape)
 
         # Get when forwarding.
         self.anchors = None  # (batch, n_anchors, 4). Same among batch so don't need batch dim.
@@ -97,7 +99,7 @@ class MRCNN(nn.Module):
         # TODO: It should be confirmed.
         feature_strides = [4, 8, 16, 32, 64]
         # generate anchors
-        self.generate_anchors(pyramid_shapes, feature_strides, p2.shape[0])
+        self.generate_anchors(pyramid_shapes, feature_strides, p2.shape[0], device=rpn_bboxes.device)
 
         # 4. Proposal Layer
         rpn_rois = self.proposal_layer.process(self.anchors, rpn_scores, rpn_bboxes)
@@ -108,9 +110,13 @@ class MRCNN(nn.Module):
             # TODO: Should reduce train_proposals_per_image to around 200. Set to 500 to avoid error when debugging.
             # DetectionTargetLayer
             rois, target_class_ids, target_bbox, target_mask = self.detection_target_layer.process(rpn_rois)
-            # visualize_box = Utils.batch_slice([rois, target_bbox], Utils.refine_boxes)
-            # Visualization.visualize_boxes(x, visualize_box, target_class_ids,
-            #                               save_dir='/home/yuruiqi/visualization/dtl_rois/', view_batch=0)
+
+            # refined_box = Utils.batch_slice([rois, target_bbox], Utils.refine_boxes)
+            # visualize_mask = torch.stack([target_mask, target_mask, target_mask, target_mask], dim=2)
+            # Visualization.visualize_detection(x, rois, class_ids=target_class_ids, masks=visualize_mask,
+            #                                  save_dir='/home/yuruiqi/visualization/dtl_rois/', view_batch=0)
+            # Visualization.visualize_detection(x, refined_box, class_ids=target_class_ids,
+            #                                   save_dir='/home/yuruiqi/visualization/dtl_rois/', view_batch=0)
             # Visualization.visualize_mask(target_mask.unsqueeze(dim=2), save_dir='/home/yuruiqi/visualization/dtl_mask/')
 
             # Network heads
@@ -122,6 +128,10 @@ class MRCNN(nn.Module):
 
             # (batch, n_rois, n_classes, pool_size*2, pool_size*2)
             mrcnn_mask = self.fpn_mask(rois, mrcnn_feature_maps)
+
+            # mrcnn_mask.register_hook(grads.save_grad('mrcnn_mask'))
+            # grads.print_grad('mrcnn_mask')
+
             # self.vfm.update(self.fpn_mask.vfm)
             # Visualization.visualize_mask(self.vfm['fpn_mask_roi_align'],
             #                              save_dir=r'/home/yuruiqi/visualization/mask_roi_align/', n_watch=10,
@@ -148,11 +158,12 @@ class MRCNN(nn.Module):
 
             return detection_boxes, detection_classes, detection_scores, mrcnn_masks
 
-    def generate_anchors(self, pyramid_shapes, feature_strides, batch_size):
+    def generate_anchors(self, pyramid_shapes, feature_strides, batch_size, device):
         """
         pyramid_shapes: [p2.shape, ...]. Maybe [[64, 64], [32, 32], [16, 16], [8, 8], [4, 4]]
         feature_strides: Default to be [4, 8, 16, 32, 64].
         batch_size: int.
+        device: The device to put anchors into.
 
         return: (batch, n_anchors, 4)
         """
@@ -161,7 +172,7 @@ class MRCNN(nn.Module):
         anchors = Utils.norm_boxes(anchors, image_shape=self.image_shape)
         # [anchor_counts, 4] to [batch, anchor_counts, 4]
         anchors = np.broadcast_to(anchors, (batch_size,) + anchors.shape)
-        anchors = torch.tensor(anchors, dtype=torch.float32).cuda()
+        anchors = torch.tensor(anchors, dtype=torch.float32, device=device)
         self.anchors = anchors
 
     def build_rpn_targets(self, anchors, gt_boxes, rpn_train_anchors_per_image):
@@ -181,7 +192,7 @@ class MRCNN(nn.Module):
         gt_boxes, _ = Utils.trim_zero_graph(gt_boxes)
 
         # Set all to neutral first.
-        rpn_match = torch.zeros([anchors.shape[0]], dtype=torch.int32)  # (n_anchors)
+        rpn_match = torch.zeros([anchors.shape[0]], dtype=torch.int16)  # (n_anchors)
         rpn_bbox = torch.zeros((anchors.shape[0], 4))  # (n_anchors, [dy, dx, log(dh), log(dw)])
 
         overlaps = Utils.compute_overlaps(anchors, gt_boxes)  # (n_anchors, n_classes)
@@ -194,7 +205,12 @@ class MRCNN(nn.Module):
         # Instead, match it to the closest anchor (even if its max IoU is < 0.3).
 
         # 1. Get matched IoU and index of the anchors. Set negative anchors.
-        anchor_iou_argmax = torch.argmax(overlaps, dim=1)  # (n_anchors), best matched gt_boxes of every anchor.
+        # TODO: Pytorch bug
+        if overlaps.shape[1] == 1:
+            anchor_iou_argmax = torch.zeros(overlaps.shape[0], dtype=torch.int64, device=overlaps.device)
+        else:
+            anchor_iou_argmax = torch.argmax(overlaps, dim=1)  # (n_anchors), best matched gt_boxes of every anchor.
+
         anchor_iou_max = torch.max(overlaps, dim=1)[0]  # (n_anchors), best matched overlaps of every anchor.
         rpn_match[anchor_iou_max < 0.3] = -1
         # 2. Set an anchor for each GT box (regardless of IoU value).
@@ -249,34 +265,35 @@ class MRCNN(nn.Module):
         rpn_match, rpn_bbox = Utils.batch_slice(
             [self.anchors, self.gt_boxes, rpn_train_anchors_per_image], self.build_rpn_targets)
 
-        rpn_match = rpn_match.cuda()
+        rpn_match = rpn_match.to(rpn_bbox.device)
         return rpn_match, rpn_bbox
 
     def set_train_gt(self, gt_class_ids, gt_boxes, gt_masks):
         self.gt_class_ids = gt_class_ids
         self.gt_boxes = gt_boxes
         self.gt_masks = gt_masks
-        self.active_class_ids = torch.where(self.gt_class_ids == 0,
-                                            torch.tensor(0, dtype=torch.int32).cuda(),
-                                            torch.tensor(1, dtype=torch.int32).cuda())
+
+        self.active_class_ids = Utils.get_active_class_ids(gt_class_ids, self.n_classes)
 
         self.detection_target_layer = DetectionTargetLayer(gt_class_ids, gt_boxes, gt_masks,
                                                            proposal_positive_ratio=0.33, train_proposals_per_image=100,
                                                            mask_shape=[28, 28])
 
-    def set_trainable(self, train_parts):
+    def set_trainable(self, train_parts, train_bn=True):
         """
-        train_part: list of 'Backbone' or 'RPN' or 'MRCNN'
+        train_part: list of 'Backbone' or 'RPN' or 'FPN_heads' or 'Heads'
         """
-        # TODO: confirm
-        def set_bn_eval(m):
-            classname = m.__class__.__name__
-            if classname.find('BatchNorm') != -1:
-                m.eval()
-        self.apply(set_bn_eval)
+        dict = {'Backbone': (self.resnet,), 'RPN': (self.fpn, self.rpn),
+                'FPN_heads': (self.fpn, self.fpn_classifier, self.fpn_mask),
+                'Heads': (self.fpn, self.rpn, self.fpn_classifier, self.fpn_mask)}
 
-        dict = {'Backbone':(self.resnet,), 'RPN':(self.fpn, self.rpn),
-                'MRCNN':(self.fpn, self.fpn_classifier, self.fpn_mask)}
+        if not train_bn:
+            def set_bn_eval(m):
+                classname = m.__class__.__name__
+                if classname.find('BatchNorm') != -1:
+                    m.eval()
+
+            self.apply(set_bn_eval)
 
         # Set all to not train
         for para in self.parameters():
@@ -289,7 +306,6 @@ class MRCNN(nn.Module):
                     para.requires_grad = True
 
     def train_part(self, images, gt_class_ids, gt_boxes, gt_masks, part=None):
-        # TODO: Confirm the relation between require_grad and optim
         self.set_train_gt(gt_class_ids, gt_boxes, gt_masks)
 
         # get pred and label
@@ -310,7 +326,7 @@ class MRCNN(nn.Module):
         if part == 'RPN':
             loss, loss_dict = LossFunction.compute_rpn_loss(rpn_logits, rpn_bboxes,
                                                             target_rpn_match, target_rpn_bbox)
-        elif part == 'MRCNN':
+        elif part == 'FPN_heads':
             loss, loss_dict = LossFunction.compute_head_loss(mrcnn_class_logits, mrcnn_bbox, mrcnn_mask,
                                                              target_class_ids, target_bbox, target_mask,
                                                              self.active_class_ids)
@@ -322,6 +338,3 @@ class MRCNN(nn.Module):
         else:
             raise ValueError("Rua")
         return loss, loss_dict
-
-    def load_weight(self, path):
-        self.resnet.load_state_dict(torch.load(path))

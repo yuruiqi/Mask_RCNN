@@ -29,6 +29,8 @@ def visualize_1_box(image, box, score=None,name='Unknow', mask=None, save_path=N
     if isinstance(mask, torch.Tensor):
         mask = mask.cpu().detach().numpy()
 
+    image = image.astype(np.float32)
+
     # [y1, x1, y2, x2] to [x1, y1, w, h]
     # print(box)
     y1, x1, y2, x2 = box.tolist()
@@ -47,6 +49,12 @@ def visualize_1_box(image, box, score=None,name='Unknow', mask=None, save_path=N
             mask = Image.fromarray(mask)
             h = int(y2 - y1)
             w = int(x2 - x1)
+            if h == 0:
+                print('rua')
+                h += 1
+            if w == 0:
+                print('rua')
+                w += 1
             mask = torchvision.transforms.functional.resize(mask, (h, w))
 
             mask_on_image = np.zeros(image.shape)
@@ -130,6 +138,7 @@ def visualize_rpn_targets(images, anchors, rpn_bbox, rpn_match, save_dir=None, v
 def visualize_mask(mrcnn_masks, save_dir=None, view_batch=None, n_watch=None, n_class_watch=None):
     if isinstance(mrcnn_masks, torch.Tensor):
         mrcnn_masks = mrcnn_masks.cpu().detach().numpy()
+    mrcnn_masks = mrcnn_masks.astype(np.float32)
 
     if view_batch:
         mrcnn_masks = np.expand_dims(mrcnn_masks[view_batch], axis=0)
@@ -212,10 +221,10 @@ def visualize_detection(images, boxes, scores=None, class_ids=None, masks=None,
             score = scores[batch, i_box] if (scores is not None) else None
             class_id = int(class_ids[batch, i_box]) if (class_ids is not None) else None
 
-            if class_id < 1:
+            if class_id is None or class_id < 1:
                 continue
 
-            mask = masks[batch, i_box, class_id-1] if (masks is not None) else None
+            mask = masks[batch, i_box, class_id] if (masks is not None) else None
 
             visualize_1_box(images[batch, 0], boxes[batch, i_box], score, str(class_id), mask, save_path=save_path)
 

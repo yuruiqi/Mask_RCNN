@@ -236,7 +236,7 @@ def batch_slice(inputs, graph_fn):
         output_slice = graph_fn(*inputs_slice)
         # Avoid error when torch.stack
         if not isinstance(output_slice, (tuple, list)):
-                    output_slice = [output_slice]
+            output_slice = [output_slice]
         outputs.append(output_slice)
 
     # [(output1_b1, output2_b1, ...), (output1_b2, output2_b2, ...), ...] to
@@ -282,7 +282,7 @@ def compute_overlaps(boxes1, boxes2):
 
     # Compute overlaps to generate matrix [boxes1 count, boxes2 count]
     # Each cell contains the IoU value.
-    overlaps = torch.zeros((boxes1.shape[0], boxes2.shape[0])).cuda()
+    overlaps = torch.zeros((boxes1.shape[0], boxes2.shape[0])).to(boxes1.device)
     for i in range(overlaps.shape[1]):
         box2 = boxes2[i]
         overlaps[:, i] = compute_iou_multi(box2, boxes1, area2[i], area1)
@@ -308,7 +308,8 @@ def compute_iou_multi(box1, boxes2, box1_area, boxes2_area):
     y2 = torch.min(box1[2], boxes2[:, 2])
     x1 = torch.max(box1[1], boxes2[:, 1])
     x2 = torch.min(box1[3], boxes2[:, 3])
-    intersection = torch.max(x2 - x1, torch.tensor(0.0).cuda()) * torch.max(y2 - y1, torch.tensor(0.0).cuda())
+    intersection = torch.max(x2 - x1, torch.tensor(0.0, device=x1.device, dtype=x1.dtype)) * \
+                   torch.max(y2 - y1, torch.tensor(0.0, device=y1.device, dtype=y1.dtype))
     union = box1_area + boxes2_area[:] - intersection[:]
     iou = intersection / union
     return iou
@@ -329,8 +330,8 @@ def compute_iou(box1, box2):
     x1 = torch.max(b1_x1, b2_x1)
     y2 = torch.min(b1_y2, b2_y2)
     x2 = torch.min(b1_x2, b2_x2)
-    intersection = torch.mul(torch.max(x2 - x1, torch.tensor([0], dtype=torch.float32).cuda()),
-                             torch.max(y2 - y1, torch.tensor([0], dtype=torch.float32).cuda()))
+    intersection = torch.mul(torch.max(x2 - x1, torch.tensor([0], dtype=torch.float32, device=x1.device)),
+                             torch.max(y2 - y1, torch.tensor([0], dtype=torch.float32, device=x1.device)))
 
     # Compute unions
     b1_area = (b1_y2 - b1_y1) * (b1_x2 - b1_x1)
@@ -351,79 +352,40 @@ def compute_backbone_shapes(backbone_name, image_shape, feature_strides=[4, 8, 1
     return pyramid_shapes
 
 
-def build_rpn_targets(anchors, gt_boxes, rpn_train_anchors_per_image=256):
-    """Given the anchors and GT boxes, compute overlaps and identify positive
-    anchors and deltas to refine them to match their corresponding GT boxes.
-    Note that only the anchor whose match is 1 or -1 has bbox. Others are zero paddings.
-    anchors: (n_anchors, [y1, x1, y2, x2])
-    gt_boxes: (n_classes, [y1, x1, y2, x2])
-    TODO: Note that it's written mistakenly in the original code.
-    return:
-        rpn_match: (n_anchors). Matches between anchors and GT boxes.
-        1 = positive anchor, -1 = negative anchor, 0 = neutral
-        rpn_bbox: (n_anchors, [dy, dx, log(dh), log(dw)]). Anchor bbox deltas.
+def get_active_class_ids(gt_class_ids, n_classes):
     """
-    if isinstance(anchors, np.ndarray):
-        anchors = torch.tensor(anchors, dtype=torch.float32).cuda()
-    if isinstance(gt_boxes, np.ndarray):
-        gt_boxes = torch.tensor(gt_boxes, dtype=torch.float32).cuda()
 
-    # Added by myself. Eliminate zero padding gt boxes. So rpn_targets will not regress to there.
-    gt_boxes, _ = trim_zero_graph(gt_boxes)
+    gt_class_ids: (batch, max_instances). From 1 to n_class. Have zero-padding.
+    n_classes: int.
 
-    # Set all to neutral first.
-    rpn_match = torch.zeros([anchors.shape[0]], dtype=torch.int32)  # (n_anchors)
-    rpn_bbox = torch.zeros((anchors.shape[0], 4))  # (n_anchors, [dy, dx, log(dh), log(dw)])
+    return: (batch, num_classes)
+            Note: num_classes includes background.
+    """
+    array = torch.zeros([gt_class_ids.shape[0], n_classes+1], dtype=torch.int32, device=gt_class_ids.device)
 
-    overlaps = compute_overlaps(anchors, gt_boxes)  # (n_anchors, n_classes)
-    # Match anchors to GT boxes
-    # If an anchor overlaps a GT box with IoU >= 0.7 then it's positive(1).
-    # If an anchor overlaps a GT box with IoU < 0.3 then it's negative(-1).
-    # Neutral(0) anchors are those that don't match the conditions above, and they don't influence the loss function.
-    # However, don't keep any GT box unmatched (rare, but happens).
-    # Instead, match it to the closest anchor (even if its max IoU is < 0.3).
+    # trim zero-padding
+    ix = gt_class_ids.gt(0).nonzero()
+    ix_fill = torch.stack([ix[:, 0], (gt_class_ids[ix[:, 0], ix[:, 1]]).to(torch.int64)], dim=1)
+    array[ix_fill[:, 0], ix_fill[:, 1]] = torch.tensor(1, dtype=torch.int32, device=gt_class_ids.device)
 
-    # 1. Get matched IoU and index of the anchors. Set negative anchors.
-    anchor_iou_argmax = torch.argmax(overlaps, dim=1)  # (n_anchors), best matched gt_boxes of every anchor.
-    anchor_iou_max = torch.max(overlaps, dim=1)[0]  # (n_anchors), best matched overlaps of every anchor.
-    rpn_match[anchor_iou_max < 0.3] = -1
+    return array
 
-    # 2. Set an anchor for each GT box (regardless of IoU value).
-    # If multiple anchors have the same IoU, then match all of them.
-    # index of all best anchors to gt boxes.
-    gt_iou_argmax = torch.nonzero(overlaps == torch.max(overlaps, dim=0)[0])[:, 0]
-    rpn_match[gt_iou_argmax] = 1
 
-    # 3. Set anchors with high overlap as positive. TODO: 0.7 maybe to high???
-    rpn_match[anchor_iou_max >= 0.7] = 1
+class GradSaver:
+    def __init__(self):
+        self.grads = {}
 
-    # Subsample to balance positive and negative anchors.
-    # 1. Don't let positives be more than half the anchors.
-    # TODO: 1.Why?     2. Need to use torch instead of np?
-    ids = np.where(rpn_match == 1)[0]  # (n_positive)
-    extra = len(ids) - rpn_train_anchors_per_image//2
-    if extra > 0:
-        # Reset the extra ones to neutral randomly.
-        ids = np.random.choice(ids, extra, replace=False)
-        rpn_match[ids] = 0
+    def save_grad(self, name):
+        def hook(grad):
+            self.grads[name] = grad
+        return hook
 
-    # 2. Don't let negatives be more than (anchors - positives).
-    ids = np.where(rpn_match == -1)[0]
-    extra = len(ids) - (rpn_train_anchors_per_image - torch.sum(rpn_match == 1)).cpu().detach().numpy()
-    if extra > 0:
-        # Rest the extra ones to neutral randomly.
-        ids = np.random.choice(ids, extra, replace=False)
-        rpn_match[ids] = 0
-
-    #  First compute deltas to the corresponding GT boxes.
-    not_positive_ids = torch.ne(rpn_match, 1)
-    anchor_gt_boxes = torch.index_select(gt_boxes, dim=0, index=anchor_iou_argmax)
-    rpn_bbox = compute_deltas(anchors, anchor_gt_boxes)
-    # TODO: Must do this?
-    # Then set not positive anchors' deltas to zero.
-    rpn_bbox[not_positive_ids] = 0
-
-    return rpn_match, rpn_bbox
+    def print_grad(self, name):
+        try:
+            grad = self.grads[name]
+            print(name, grad.max().item(), grad.min().item())
+        except:
+            pass
 
 
 if __name__ == '__main__':

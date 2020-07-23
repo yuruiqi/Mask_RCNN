@@ -110,6 +110,7 @@ class ResNetPyTorch(ResNet):
 
         if pretrained:
             self.load_state_dict(torch.load(resnet50_path))
+            # self.half()
 
     def _forward_impl(self, x):
         # See note [TorchScript super()]
@@ -122,10 +123,6 @@ class ResNetPyTorch(ResNet):
         c3 = self.layer2(c2)
         c4 = self.layer3(c3)
         c5 = self.layer4(c4)
-
-        # x = self.avgpool(x)
-        # x = torch.flatten(x, 1)
-        # x = self.fc(x)
 
         return [c1, c2, c3, c4, c5]
 
@@ -160,8 +157,6 @@ class FPN(nn.Module):
     def forward(self, featuremaps):
         _, c2, c3, c4, c5 = featuremaps
         p5 = self.conv5_1(c5)
-        # p4 = self.conv4_1(c4)
-        # p4up = nn.Upsample(scale_factor=2)(p5)
         p4 = self.conv4_1(c4) + nn.Upsample(scale_factor=2)(p5)
         p3 = self.conv3_1(c3) + nn.Upsample(scale_factor=2)(p4)
         p2 = self.conv2_1(c2) + nn.Upsample(scale_factor=2)(p3)
@@ -233,6 +228,7 @@ class FPNClassifier(nn.Module):
         """
         in_channel: int. The out channel of FPN.
         n_classes: int. Number of classes.
+                   Note: num_classes includes background.
         fc_layers_size: int. The size of the fully connected layer.
         pool_size: int. Pooling size of pyramid roi align.
         image_shape: [h, w]. The shape of original image.
@@ -240,7 +236,7 @@ class FPNClassifier(nn.Module):
         super().__init__()
         self.pool_size = pool_size
         self.image_shape = image_shape
-        self.num_classes = n_classes
+        self.num_classes = n_classes + 1
         self.pyramid_roi_align = PyramidROIAlign(pool_size, image_shape)
 
         self.conv1 = nn.Sequential(nn.Conv2d(in_channel, fc_layers_size, kernel_size=pool_size),
@@ -249,8 +245,8 @@ class FPNClassifier(nn.Module):
         self.conv2 = nn.Sequential(nn.Conv2d(fc_layers_size, fc_layers_size, kernel_size=1),
                                    nn.BatchNorm2d(fc_layers_size, track_running_stats=train_bn),
                                    nn.ReLU())
-        self.dense_logits = nn.Linear(fc_layers_size, n_classes)
-        self.dense_bbox = nn.Linear(fc_layers_size, n_classes*4)
+        self.dense_logits = nn.Linear(fc_layers_size, self.num_classes)
+        self.dense_bbox = nn.Linear(fc_layers_size, self.num_classes*4)
 
         self.vfm = {}
 
@@ -290,37 +286,38 @@ class FPNClassifier(nn.Module):
 
 
 class FPNMask(nn.Module):
-    def __init__(self, in_channel, n_classes, mask_pool_size, image_shape, train_bn=True):
+    def __init__(self, in_channel, n_classes, mask_pool_size, image_shape):
         """
         in_channel: int. The out channel of FPN.
         n_classes: int. Number of classes.
+                   Note: num_classes include background.
         mask_pool_size: int. Pooling size of pyramid roi align.
         image_shape: [h, w]. The shape of original image.
         """
         super().__init__()
         self.mask_pool_size = mask_pool_size
         self.image_shape = image_shape
-        self.num_classes = n_classes
+        self.num_classes = n_classes + 1
         self.pyramid_roi_align = PyramidROIAlign(mask_pool_size, image_shape)
         # visualization feature map
         self.vfm = {}
 
         # TODO: Maybe I can change the out channels. Or use U-Net.
         self.conv1 = nn.Sequential(nn.Conv2d(in_channel, 256, kernel_size=3, padding=1),
-                                   nn.BatchNorm2d(256, track_running_stats=train_bn),
+                                   nn.BatchNorm2d(256),
                                    nn.ReLU())
         self.conv2 = nn.Sequential(nn.Conv2d(256, 256, kernel_size=3, padding=1),
-                                   nn.BatchNorm2d(256, track_running_stats=train_bn),
+                                   nn.BatchNorm2d(256),
                                    nn.ReLU())
         self.conv3 = nn.Sequential(nn.Conv2d(256, 256, kernel_size=3, padding=1),
-                                   nn.BatchNorm2d(256, track_running_stats=train_bn),
+                                   nn.BatchNorm2d(256),
                                    nn.ReLU())
         self.conv4 = nn.Sequential(nn.Conv2d(256, 256, kernel_size=3, padding=1),
-                                   nn.BatchNorm2d(256, track_running_stats=train_bn),
+                                   nn.BatchNorm2d(256),
                                    nn.ReLU())
         self.deconv = nn.Sequential(nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2),
                                     nn.ReLU())
-        self.conv1x1 = nn.Sequential(nn.Conv2d(256, n_classes, kernel_size=1),
+        self.conv1x1 = nn.Sequential(nn.Conv2d(256, self.num_classes, kernel_size=1),
                                      nn.Sigmoid())
 
     def forward(self, rois, feature_maps):
@@ -336,6 +333,13 @@ class FPNMask(nn.Module):
         x = Utils.batch_slice(x, self.conv1)
         # self.vfm['fpn_mask_conv1'] = x
         x = Utils.batch_slice(x, self.conv2)
+
+        # x.register_hook(save_grad('x'))
+        # try:
+        #     print(grads['x'].max())
+        # except:
+        #     pass
+
         # self.vfm['fpn_mask_conv2'] = x
         x = Utils.batch_slice(x, self.conv3)
         # self.vfm['fpn_mask_conv3'] = x

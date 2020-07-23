@@ -134,6 +134,10 @@ class ShapeCreator:
 
     def get_data(self, to_gpu=True):
         images, gt_class_ids, gt_masks, gt_boxes = self.canvas, self.class_ids, self.mask, self.boxes
+
+        # Transform to 3 channels.
+        images = np.concatenate([images, images, images], axis=1)
+
         if to_gpu:
             images = torch.tensor(images, dtype=torch.float32)  # (batch, n_classes, 1, 256, 256)
             gt_class_ids = torch.tensor(gt_class_ids, dtype=torch.float32)  # (batch, n_classes)
