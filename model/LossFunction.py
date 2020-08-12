@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
-from model import Utils
+from model.Utils import GradSaver
+# from model import Utils
 
-grads = Utils.GradSaver()
+grads = GradSaver()
 
 
+# TODO: nn.Module
 def compute_rpn_class_loss(rpn_class_logits, rpn_match):
     """RPN anchors classifier loss.
 
@@ -44,6 +46,7 @@ def compute_rpn_bbox_loss(rpn_bbox, target_bbox, rpn_match):
 def compute_mrcnn_class_loss(pred_class_logits, target_class_ids, active_class_ids):
     """
     Loss for the classifier head of Mask RCNN.
+    TODO: different
 
     pred_class_logits: (batch, n_rois, num_classes)
                       Note: num_classes includes background.
@@ -51,15 +54,19 @@ def compute_mrcnn_class_loss(pred_class_logits, target_class_ids, active_class_i
     active_class_ids: (batch, num_classes). Has a value of 1 for classes that are in the dataset of the image, and 0
         for classes that are not in the dataset.
     """
-    # Trim zero paddings
-    ix = target_class_ids.gt(0)
-    pred_class_logits = pred_class_logits[ix]
-    target_class_ids = target_class_ids[ix]
+    pred_class_logits = pred_class_logits.reshape([-1, pred_class_logits.shape[2]])
+    target_class_ids = target_class_ids.reshape([-1])
+    loss = nn.functional.cross_entropy(pred_class_logits, target_class_ids.to(torch.long))
 
-    if pred_class_logits.shape[0] == 0:
-        loss = torch.tensor(1, dtype=pred_class_logits.dtype, device=pred_class_logits.device, requires_grad=True)
-    else:
-        loss = nn.functional.cross_entropy(pred_class_logits, target_class_ids.to(torch.long))
+    # Trim zero paddings
+    # ix = target_class_ids.gt(0)
+    # pred_class_logits = pred_class_logits[ix]
+    # target_class_ids = target_class_ids[ix]
+    #
+    # if pred_class_logits.shape[0] == 0:
+    #     loss = torch.tensor(1, dtype=pred_class_logits.dtype, device=pred_class_logits.device, requires_grad=True)
+    # else:
+    #     loss = nn.functional.cross_entropy(pred_class_logits, target_class_ids.to(torch.long))
     return loss
 
 
@@ -79,7 +86,6 @@ def compute_mrcnn_bbox_loss(pred_bbox, target_bbox, target_class_ids):
     positive_roi_ix = target_class_ids.gt(0).nonzero().squeeze(dim=1)  # (n_positive). roi_index
     # (n_positive). class_ids
     positive_roi_class_ids = torch.index_select(target_class_ids, dim=0, index=positive_roi_ix).to(torch.int64)
-    # TODO: should minus 1 to be indice.
     indices = torch.stack([positive_roi_ix, positive_roi_class_ids], dim=1)  # (n_positive, [roi_index, class_ids])
 
     # Gather the deltas (predicted and true) that contribute to loss
@@ -87,7 +93,8 @@ def compute_mrcnn_bbox_loss(pred_bbox, target_bbox, target_class_ids):
     pred_bbox = pred_bbox[indices[:, 0], indices[:, 1], :]  # (n_positive, 4)
 
     if target_bbox.shape[0] > 0:
-        loss = nn.functional.smooth_l1_loss(pred_bbox, target_bbox)
+        # loss = nn.functional.smooth_l1_loss(pred_bbox, target_bbox)
+        loss = nn.functional.mse_loss(pred_bbox, target_bbox)
     else:
         loss = torch.tensor(1.0, requires_grad=True, device=pred_bbox.device)
     return loss

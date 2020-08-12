@@ -5,6 +5,9 @@ from model import Utils
 from torchvision.models.resnet import ResNet, Bottleneck
 
 
+grads = Utils.GradSaver()
+
+
 # ResNet
 class ResBlock(nn.Module):
     """
@@ -266,17 +269,22 @@ class FPNClassifier(nn.Module):
 
         # TODO: Make sure that batch_slice is equal to TimeDistributed
         # Share weights among dim "num_rois".
-        x = Utils.batch_slice(x, self.conv1)
-        x = Utils.batch_slice(x, self.conv2)
+        # x = Utils.batch_slice(x, self.conv1)
+        # x = Utils.batch_slice(x, self.conv2)
+        x = Utils.time_distributed(x, self.conv1)
+        x = Utils.time_distributed(x, self.conv2)
         # (batch, num_rois, fc_layers_size, 1, 1) to (batch, num_rois, fc_layers_size)
         shared = torch.squeeze(torch.squeeze(x, dim=4), dim=3)
 
         # Classifier head
-        mrcnn_class_logits = Utils.batch_slice(shared, self.dense_logits)
-        mrcnn_probs = Utils.batch_slice(mrcnn_class_logits, nn.Softmax())
+        # mrcnn_class_logits = Utils.batch_slice(shared, self.dense_logits)
+        # mrcnn_probs = Utils.batch_slice(mrcnn_class_logits, nn.Softmax())
+        mrcnn_class_logits = Utils.time_distributed(shared, self.dense_logits)
+        mrcnn_probs = Utils.time_distributed(mrcnn_class_logits, nn.Softmax(dim=-1))
 
         # BBox head
-        mrcnn_bbox = Utils.batch_slice(shared, self.dense_bbox)
+        # mrcnn_bbox = Utils.batch_slice(shared, self.dense_bbox)
+        mrcnn_bbox = Utils.time_distributed(shared, self.dense_bbox)
         # [batch, num_rois, NUM_CLASSES * (dy, dx, log(dh), log(dw))] to
         # [batch, num_rois, NUM_CLASSES, (dy, dx, log(dh), log(dw))]
         shape = mrcnn_bbox.shape[:2] + (self.num_classes, 4)
@@ -330,9 +338,11 @@ class FPNMask(nn.Module):
         # ROI Polling. (batch, num_rois, channels, mask_pool_size, mask_pool_size)
         x = self.pyramid_roi_align.process(rois, feature_maps)
         # self.vfm['fpn_mask_roi_align'] = x
-        x = Utils.batch_slice(x, self.conv1)
+        # x = Utils.batch_slice(x, self.conv1)
+        x = Utils.time_distributed(x, self.conv1)
         # self.vfm['fpn_mask_conv1'] = x
-        x = Utils.batch_slice(x, self.conv2)
+        # x = Utils.batch_slice(x, self.conv2)
+        x = Utils.time_distributed(x, self.conv2)
 
         # x.register_hook(save_grad('x'))
         # try:
@@ -341,12 +351,16 @@ class FPNMask(nn.Module):
         #     pass
 
         # self.vfm['fpn_mask_conv2'] = x
-        x = Utils.batch_slice(x, self.conv3)
+        # x = Utils.batch_slice(x, self.conv3)
+        x = Utils.time_distributed(x, self.conv3)
         # self.vfm['fpn_mask_conv3'] = x
-        x = Utils.batch_slice(x, self.conv4)
+        # x = Utils.batch_slice(x, self.conv4)
+        x = Utils.time_distributed(x, self.conv4)
         # self.vfm['fpn_mask_conv4'] = x
-        x = Utils.batch_slice(x, self.deconv)
+        # x = Utils.batch_slice(x, self.deconv)
+        x = Utils.time_distributed(x, self.deconv)
         # self.vfm['fpn_mask_deconv'] = x
-        x = Utils.batch_slice(x, self.conv1x1)
+        # x = Utils.batch_slice(x, self.conv1x1)
+        x = Utils.time_distributed(x, self.conv1x1)
         # self.vfm['fpn_mask_conv1x1'] = x
         return x

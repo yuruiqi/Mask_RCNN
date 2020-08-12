@@ -15,7 +15,7 @@ class ProposalLayer:
     The anchors is arranged in order of anchors, transverse, longitude.
     """
 
-    def __init__(self, post_nms_rois, nms_threshold=0.7, pre_nms_limit=6000):
+    def __init__(self, post_nms_rois=1000, nms_threshold=0.7, pre_nms_limit=6000):
         """
         post_nms_rois: ROIs kept after non-maximum suppression. Default to be 1000.
         nms_threshold:  Threshold of IOU to perform nms. Boxes IoU > nm_threshold will be discarded. Default to be 0.7.
@@ -41,6 +41,8 @@ class ProposalLayer:
         scores, ix = torch.topk(scores, k=self.pre_nms_limit, dim=-1, sorted=True)
         deltas = Utils.batch_slice([deltas, ix], lambda x, y: torch.index_select(x, dim=0, index=y))
         anchors = Utils.batch_slice([anchors, ix], lambda x, y: torch.index_select(x, dim=0, index=y))
+        self.vfm['rpn_scores'] = scores
+        self.vfm['rpn_anchors'] = anchors
 
         # Apply deltas to anchors to get refined boxes. [batch, N, (y1, x1, y2, x2)]
         boxes = Utils.batch_slice([anchors, deltas], lambda x, y: Utils.refine_boxes(x, y))
@@ -255,6 +257,8 @@ class DetectionLayer:
         self.detection_max_instance = detection_max_instances
         self.detection_nms_threshold = detection_nms_threshold
 
+        self.vfm = {}
+
     def process(self, rois, mrcnn_class, mrcnn_bbox):
         """
         rois: (batch, n_rois, 4)
@@ -285,6 +289,11 @@ class DetectionLayer:
         refined_rois = Utils.refine_boxes(rois, deltas_specific)
         refined_rois = Utils.clip_boxes(refined_rois, self.window.to(device=refined_rois.device))
 
+        if 'refined_rois' not in self.vfm.keys():
+            self.vfm['refined_rois'] = refined_rois.unsqueeze(dim=0)
+        else:
+            self.vfm['refined_rois'] = torch.cat([self.vfm['refined_rois'], refined_rois.unsqueeze(dim=0)], dim=0)
+
         # Filter out background.
         keep = torch.nonzero(torch.gt(class_ids, 0))[:, 0]  # (n)
         # Omit filter out low confidence boxes. TODO: Confirm if it's appropriate.
@@ -305,7 +314,7 @@ class DetectionLayer:
             return: (detection_max_instance)
             """
             # Indices of ROIS of the given class
-            ixs = torch.nonzero(torch.eq(pre_nms_class_ids, class_id))[:, 0]
+            ixs = pre_nms_class_ids.eq(class_id).nonzero()[:, 0]
             # Apply NMS. class_keep is the indice of the roi(after ixs index) after nms.
             class_keep = ops.nms(pre_nms_rois[ixs], pre_nms_scores[ixs], iou_threshold=self.detection_nms_threshold)
             # Because torch can't limit the proposal_count, it should be realized by myself.
@@ -333,7 +342,6 @@ class DetectionLayer:
         top_ids = torch.topk(class_scores_keep, k=num_keep, sorted=True)[1]
 
         # Arrange output as (n_detections, [y1, x1, y2, x2, class_id, score])
-        # TODO: Need add class_id by 1 because class_id is in [0, n_class-1]?
         detections = torch.cat([refined_rois[keep],
                                 class_ids[keep].to(refined_rois.dtype).unsqueeze(dim=1),
                                 torch.unsqueeze(class_scores[keep], dim=1)], dim=1)
@@ -367,6 +375,7 @@ class PyramidROIAlign:
         # TODO: 224 for an ROI is to large. Maybe I can change it.
         image_area = self.image_shape[0] * self.image_shape[1]
         k = 4 + torch.log2(torch.sqrt(h * w)/(224.0/math.sqrt(image_area)))
+        # k = 4 + torch.log2(torch.sqrt(h * w)/(50.0/math.sqrt(image_area)))
         # Should <=5 and >=2
         roi_level = torch.min(torch.tensor(5, dtype=torch.int16, device=k.device),
                               torch.max(torch.tensor(2, dtype=torch.int16, device=k.device), torch.round(k).to(torch.int16)))

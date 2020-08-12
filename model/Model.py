@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
 
-from model import Utils, Visualization, LossFunction
+from model import Utils
+from model.LossFunction import compute_loss, compute_rpn_loss, compute_head_loss
 from model.NetworkLayers import ResNet50, ResNetPyTorch, FPN, RPN, FPNClassifier, FPNMask
 from model.FunctionLayers import ProposalLayer, DetectionTargetLayer, DetectionLayer
+from model.Visualization import Observer, visualize_rpn_targets
 
 import numpy as np
 import os
@@ -20,6 +22,11 @@ class MRCNN(nn.Module):
         self.image_shape = image_shape
         self.n_classes = n_classes
 
+        self.scales = [32, 64, 128, 256, 512]
+        self.ratios = [0.5, 1, 2]
+        self.anchor_genertor = Utils.AnchorGenerator(scales=self.scales, ratios=self.ratios)
+        self.anchor_per_location = len(self.ratios)
+
         self.anchors = None
         self.gt_class_ids = None
         self.gt_boxes = None
@@ -34,11 +41,11 @@ class MRCNN(nn.Module):
         self.resnet = ResNetPyTorch(pretrained=pretrain)
 
         self.fpn = FPN(2048, 256)
-        self.rpn = RPN(256)
+        self.rpn = RPN(256, anchors_per_location=self.anchor_per_location)
 
-        self.proposal_layer = ProposalLayer(post_nms_rois=300, nms_threshold=0.8, pre_nms_limit=1000)
+        self.proposal_layer = ProposalLayer(post_nms_rois=300, nms_threshold=0.8, pre_nms_limit=500)
         self.detection_target_layer = None
-        self.detection_layer = DetectionLayer(detection_max_instances=10, detection_nms_threshold=0.7)
+        self.detection_layer = DetectionLayer(detection_max_instances=3, detection_nms_threshold=0.3)
         # in channel = fpn out channel, out channel = num_classes
         self.fpn_classifier = FPNClassifier(256, n_classes, fc_layers_size=1024, pool_size=7, image_shape=image_shape)
         self.fpn_mask = FPNMask(256, n_classes, mask_pool_size=14, image_shape=image_shape)
@@ -100,28 +107,27 @@ class MRCNN(nn.Module):
         feature_strides = [4, 8, 16, 32, 64]
         # generate anchors
         self.generate_anchors(pyramid_shapes, feature_strides, p2.shape[0], device=rpn_bboxes.device)
-
         # 4. Proposal Layer
         rpn_rois = self.proposal_layer.process(self.anchors, rpn_scores, rpn_bboxes)
+        self.vfm.update(self.proposal_layer.vfm)
         self.vfm['rpn_rois'] = rpn_rois
 
+        # return None, None, None, None
         # 5. Train or Inference
         if self.mode == 'train':
             # TODO: Should reduce train_proposals_per_image to around 200. Set to 500 to avoid error when debugging.
             # DetectionTargetLayer
             rois, target_class_ids, target_bbox, target_mask = self.detection_target_layer.process(rpn_rois)
 
+            # observer = Observer(x, self.gt_boxes, self.gt_class_ids, self.gt_masks, '/home/yuruiqi/visualization')
+            # observer.show_boxes_filt(channel=0, boxes=rois, match=target_class_ids, match_score=2, save_dir=r'/home/yuruiqi/visualization/dtl_box')
             # refined_box = Utils.batch_slice([rois, target_bbox], Utils.refine_boxes)
-            # visualize_mask = torch.stack([target_mask, target_mask, target_mask, target_mask], dim=2)
-            # Visualization.visualize_detection(x, rois, class_ids=target_class_ids, masks=visualize_mask,
-            #                                  save_dir='/home/yuruiqi/visualization/dtl_rois/', view_batch=0)
-            # Visualization.visualize_detection(x, refined_box, class_ids=target_class_ids,
-            #                                   save_dir='/home/yuruiqi/visualization/dtl_rois/', view_batch=0)
-            # Visualization.visualize_mask(target_mask.unsqueeze(dim=2), save_dir='/home/yuruiqi/visualization/dtl_mask/')
+            # observer.show_boxes_filt(channel=0, boxes=refined_box, match=target_class_ids, match_score=0, save_dir=r'/home/yuruiqi/visualization/dtl_box')
 
             # Network heads
             # (batch, n_rois, n_classes), (batch, n_rois, n_classes), (batch, n_rois, n_classes, 4)
             mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.fpn_classifier(rois, mrcnn_feature_maps)
+
             # self.vfm.update(self.fpn_classifier.vfm)
             # Visualization.visualize_mask(self.vfm['fpn_classifier_roi_align'],
             #                              save_dir=r'/home/yuruiqi/visualization/classifier_roi_align/', n_watch=10, n_class_watch=10)
@@ -155,6 +161,7 @@ class MRCNN(nn.Module):
 
             # self.vfm.update(self.fpn_classifier.vfm)
             # self.vfm.update(self.fpn_mask.vfm)
+            self.vfm.update(self.detection_layer.vfm)
 
             return detection_boxes, detection_classes, detection_scores, mrcnn_masks
 
@@ -167,8 +174,8 @@ class MRCNN(nn.Module):
 
         return: (batch, n_anchors, 4)
         """
-        anchor_genertor = Utils.AnchorGenerator(scales=[32, 64, 96], ratios=[0.5, 1, 1])
-        anchors = anchor_genertor.get_anchors(pyramid_shapes, feature_strides)
+        # anchors = self.anchor_genertor.get_anchors(pyramid_shapes, feature_strides)
+        anchors = Utils.generate_pyramid_anchors(self.scales, self.ratios, pyramid_shapes, feature_strides, 1)
         anchors = Utils.norm_boxes(anchors, image_shape=self.image_shape)
         # [anchor_counts, 4] to [batch, anchor_counts, 4]
         anchors = np.broadcast_to(anchors, (batch_size,) + anchors.shape)
@@ -276,7 +283,7 @@ class MRCNN(nn.Module):
         self.active_class_ids = Utils.get_active_class_ids(gt_class_ids, self.n_classes)
 
         self.detection_target_layer = DetectionTargetLayer(gt_class_ids, gt_boxes, gt_masks,
-                                                           proposal_positive_ratio=0.33, train_proposals_per_image=100,
+                                                           proposal_positive_ratio=0.5, train_proposals_per_image=100,
                                                            mask_shape=[28, 28])
 
     def set_trainable(self, train_parts, train_bn=True):
@@ -316,22 +323,26 @@ class MRCNN(nn.Module):
         target_rpn_match, target_rpn_bbox = self.get_rpn_targets()
 
         # visualize amchors and target boxes and masks
-        # Visualization.visualize_boxes(images, self.anchors, save_dir='/home/yuruiqi/visualization/anchors/',
-        #                               view_batch=0, n_watch=200)
-        # Visualization.visualize_rpn_targets(images, self.anchors, target_rpn_bbox, target_rpn_match,
-        #                                     save_dir='/home/yuruiqi/visualization/target_rpn_box/', n_watch=50)
+        # observer = Observer(images, gt_boxes, gt_class_ids, gt_masks, '/home/yuruiqi/visualization')
+        # observer.show_boxes(channel=0, boxes=self.anchors, save_dir=r'/home/yuruiqi/visualization/anchor')
+
+        # observer.show_boxes_filt(channel=0,boxes=self.anchors,
+        #                          match=target_rpn_match, save_dir=r'/home/yuruiqi/visualization/anchor')
+        # observer.show_boxes_filt(channel=0, boxes=Utils.batch_slice([self.anchors, target_rpn_bbox], Utils.refine_boxes),
+        #                          match=target_rpn_match, save_dir=r'/home/yuruiqi/visualization/target_rpn_box')
+
         # Visualization.visualize_target_mask(target_mask, save_dir='/home/yuruiqi/visualization/target_mask/')
 
         # Compute Loss
         if part == 'RPN':
-            loss, loss_dict = LossFunction.compute_rpn_loss(rpn_logits, rpn_bboxes,
+            loss, loss_dict = compute_rpn_loss(rpn_logits, rpn_bboxes,
                                                             target_rpn_match, target_rpn_bbox)
         elif part == 'FPN_heads':
-            loss, loss_dict = LossFunction.compute_head_loss(mrcnn_class_logits, mrcnn_bbox, mrcnn_mask,
+            loss, loss_dict = compute_head_loss(mrcnn_class_logits, mrcnn_bbox, mrcnn_mask,
                                                              target_class_ids, target_bbox, target_mask,
                                                              self.active_class_ids)
         elif part == 'Heads':
-            loss, loss_dict = LossFunction.compute_loss(rpn_logits, rpn_bboxes, target_rpn_match, target_rpn_bbox,
+            loss, loss_dict = compute_loss(rpn_logits, rpn_bboxes, target_rpn_match, target_rpn_bbox,
                                                         mrcnn_class_logits, mrcnn_bbox, mrcnn_mask,
                                                         target_class_ids, target_bbox, target_mask,
                                                         self.active_class_ids)
