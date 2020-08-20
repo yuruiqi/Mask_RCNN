@@ -68,19 +68,20 @@ def compute_ap(precision, recall):
     return:
     """
     # Pad with start and end values.
-    precision = [0] + precision + [0]
-    recall = [0] + recall + [1]
+    precision = np.array([0] + precision + [0])
+    recall = np.array([0] + recall + [1])
 
     # TODO: Comprehend.
-    for i in range(len(precision)-1, 0, -1):
+    # for i in range(len(precision)-1, 0, -1):
+    for i in range(precision.size-1, 0, -1):
         precision[i-1] = max(precision[i-1], precision[i])
 
-    i = np.where(recall[:-1] != recall[1:])[0].item()
+    i = np.where(recall[:-1] != recall[1:])[0]
     ap = np.sum((recall[i+1] - recall[i]) * precision[i+1])
     return ap
 
 
-def compute_class_ap(class_ap_list, n_all_gt_class):
+def compute_class_ap(class_ap_list, n_all_gt_box):
     """
     class_ap_list: [[confidence, judge], ...]
     n_all_gt_class:  int.
@@ -105,7 +106,7 @@ def compute_class_ap(class_ap_list, n_all_gt_class):
         else:
             raise ValueError('Rua')
         precision.append(tp_acc/(tp_acc + fp_acc))
-        recall.append(tp_acc/n_all_gt_class)
+        recall.append(tp_acc/n_all_gt_box)
     # print(recall, precision)
     # Compute AP
     plt.plot(recall, precision)

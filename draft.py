@@ -9,6 +9,8 @@ from model.FunctionLayers import transform_coordianates
 import matplotlib.pyplot as plt
 import os
 
+tf.nn.sparse_softmax_cross_entropy_with_logits()
+
 if __name__ == '__main__':
     # 1.
     os.environ['CUDA_VISIBLE_DEVICES'] = '2, 3'

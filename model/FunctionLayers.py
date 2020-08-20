@@ -105,8 +105,7 @@ class DetectionTargetLayer:
     """
     Subsamples proposals by splitting positive and negative proposals.
     """
-    def __init__(self, gt_class_ids, gt_boxes, gt_masks, proposal_positive_ratio, train_proposals_per_image,
-                 mask_shape):
+    def __init__(self, proposal_positive_ratio, train_proposals_per_image, mask_shape, positive_iou_threshold=0.5):
         """
         gt_class_ids: (batch, max_gt_instances)
         gt_boxes: (batch, max_gt_instances, [y1, x1, y2, x2]) in normalized coordinates.
@@ -115,12 +114,19 @@ class DetectionTargetLayer:
         train_proposals_per_image: int. Number of ROIs per image to feed to classifier/mask heads. Default to be 200.
         mask_shape: [h, w]. Shape of output mask
         """
-        self.gt_class_ids = gt_class_ids
-        self.gt_boxes = gt_boxes
-        self.gt_masks = gt_masks
+        self.gt_class_ids = None
+        self.gt_boxes = None
+        self.gt_masks = None
         self.roi_positive_ratio = proposal_positive_ratio
         self.train_rois_per_image = train_proposals_per_image
         self.mask_shape = mask_shape
+
+        self.positive_iou_threshold = positive_iou_threshold
+
+    def get_gt(self, gt_class_ids, gt_boxes, gt_masks):
+        self.gt_class_ids = gt_class_ids
+        self.gt_boxes = gt_boxes
+        self.gt_masks = gt_masks
 
     def process(self, proposals):
         outputs = Utils.batch_slice([proposals, self.gt_class_ids, self.gt_boxes, self.gt_masks],
@@ -149,8 +155,8 @@ class DetectionTargetLayer:
         gt_class_ids = torch.index_select(gt_class_ids, dim=0, index=non_zeros_ix)
         gt_masks = torch.index_select(gt_masks, dim=0, index=non_zeros_ix)
 
-        # Compute overlaps. overlaps (n_proposals, n_gt_boxes)
-        overlaps = Utils.compute_overlaps(proposals, gt_boxes)
+        # Compute overlaps.
+        overlaps = Utils.compute_overlaps(proposals, gt_boxes)  # (n_proposals, n_gt_boxes)
 
         # Determine positive and negative ROIs.
         # To every proposal, get the max IoU with all the gt boxes.
@@ -158,9 +164,10 @@ class DetectionTargetLayer:
         # Positive rois are those with >= 0.5 IoU with a GT box.
         # Negative rois are those with < 0.5 IoU with every GT box.
         positive_roi_bool = torch.gt(proposal_iou_max,
-                                     torch.tensor([0.5], dtype=proposal_iou_max.dtype, device=proposal_iou_max.device))
+                                     torch.tensor([self.positive_iou_threshold], dtype=proposal_iou_max.dtype, device=proposal_iou_max.device))
         positive_ix = torch.nonzero(positive_roi_bool)
         negative_ix = torch.nonzero(~positive_roi_bool)
+        # print(positive_ix.shape, negative_ix.shape)
 
         # Subsample rois to make positive/all = proposal_positive_ratio
         # 1. Positive rois (proposal_positive_ratio * train_proposals_per_image, 4)
@@ -257,6 +264,8 @@ class DetectionLayer:
         self.detection_max_instance = detection_max_instances
         self.detection_nms_threshold = detection_nms_threshold
 
+        self.detection_min_confidence = 0.7
+
         self.vfm = {}
 
     def process(self, rois, mrcnn_class, mrcnn_bbox):
@@ -293,10 +302,15 @@ class DetectionLayer:
             self.vfm['refined_rois'] = refined_rois.unsqueeze(dim=0)
         else:
             self.vfm['refined_rois'] = torch.cat([self.vfm['refined_rois'], refined_rois.unsqueeze(dim=0)], dim=0)
+        
+        # Filter out background.
+        # keep = torch.nonzero(torch.gt(class_ids, 0))[:, 0]  # (n)
 
         # Filter out background.
-        keep = torch.nonzero(torch.gt(class_ids, 0))[:, 0]  # (n)
+        keep = class_ids.gt(0)  # (n)
         # Omit filter out low confidence boxes. TODO: Confirm if it's appropriate.
+        conf_keep = class_scores.gt(self.detection_min_confidence)  # (n)
+        keep = (keep*conf_keep).nonzero()[:, 0]  # (n)
 
         # Apply per-class NMS
         # 1. Prepare
@@ -353,9 +367,10 @@ class DetectionLayer:
 
 # Pyramid ROI Align
 class PyramidROIAlign:
-    def __init__(self, pool_size, image_shape):
+    def __init__(self, pool_size, image_shape, p4_box_size=224.0):
         self.pool_size = pool_size
         self.image_shape = image_shape
+        self.p4_box_size = p4_box_size
 
     def process(self, boxes, feature_maps):
         """
@@ -374,8 +389,8 @@ class PyramidROIAlign:
         # e.g. a 224x224 ROI (in pixels) maps to P4.
         # TODO: 224 for an ROI is to large. Maybe I can change it.
         image_area = self.image_shape[0] * self.image_shape[1]
-        k = 4 + torch.log2(torch.sqrt(h * w)/(224.0/math.sqrt(image_area)))
-        # k = 4 + torch.log2(torch.sqrt(h * w)/(50.0/math.sqrt(image_area)))
+        # k = 4 + torch.log2(torch.sqrt(h * w)/(224.0/math.sqrt(image_area)))
+        k = 4 + torch.log2(torch.sqrt(h * w)/(self.p4_box_size/math.sqrt(image_area)))
         # Should <=5 and >=2
         roi_level = torch.min(torch.tensor(5, dtype=torch.int16, device=k.device),
                               torch.max(torch.tensor(2, dtype=torch.int16, device=k.device), torch.round(k).to(torch.int16)))

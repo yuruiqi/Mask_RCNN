@@ -227,7 +227,7 @@ class RPN(nn.Module):
 # Feature Pyramid Network Heads
 ################################
 class FPNClassifier(nn.Module):
-    def __init__(self, in_channel, n_classes, fc_layers_size, pool_size, image_shape, train_bn=True):
+    def __init__(self, in_channel, n_classes, fc_layers_size, pool_size, image_shape, train_bn=True, p4_box_size=224.0):
         """
         in_channel: int. The out channel of FPN.
         n_classes: int. Number of classes.
@@ -240,7 +240,7 @@ class FPNClassifier(nn.Module):
         self.pool_size = pool_size
         self.image_shape = image_shape
         self.num_classes = n_classes + 1
-        self.pyramid_roi_align = PyramidROIAlign(pool_size, image_shape)
+        self.pyramid_roi_align = PyramidROIAlign(pool_size, image_shape, p4_box_size)
 
         self.conv1 = nn.Sequential(nn.Conv2d(in_channel, fc_layers_size, kernel_size=pool_size),
                                    nn.BatchNorm2d(fc_layers_size, track_running_stats=train_bn),
@@ -269,21 +269,16 @@ class FPNClassifier(nn.Module):
 
         # TODO: Make sure that batch_slice is equal to TimeDistributed
         # Share weights among dim "num_rois".
-        # x = Utils.batch_slice(x, self.conv1)
-        # x = Utils.batch_slice(x, self.conv2)
         x = Utils.time_distributed(x, self.conv1)
         x = Utils.time_distributed(x, self.conv2)
         # (batch, num_rois, fc_layers_size, 1, 1) to (batch, num_rois, fc_layers_size)
         shared = torch.squeeze(torch.squeeze(x, dim=4), dim=3)
 
         # Classifier head
-        # mrcnn_class_logits = Utils.batch_slice(shared, self.dense_logits)
-        # mrcnn_probs = Utils.batch_slice(mrcnn_class_logits, nn.Softmax())
         mrcnn_class_logits = Utils.time_distributed(shared, self.dense_logits)
         mrcnn_probs = Utils.time_distributed(mrcnn_class_logits, nn.Softmax(dim=-1))
 
         # BBox head
-        # mrcnn_bbox = Utils.batch_slice(shared, self.dense_bbox)
         mrcnn_bbox = Utils.time_distributed(shared, self.dense_bbox)
         # [batch, num_rois, NUM_CLASSES * (dy, dx, log(dh), log(dw))] to
         # [batch, num_rois, NUM_CLASSES, (dy, dx, log(dh), log(dw))]
@@ -294,7 +289,7 @@ class FPNClassifier(nn.Module):
 
 
 class FPNMask(nn.Module):
-    def __init__(self, in_channel, n_classes, mask_pool_size, image_shape):
+    def __init__(self, in_channel, n_classes, mask_pool_size, image_shape, p4_box_size=224.0):
         """
         in_channel: int. The out channel of FPN.
         n_classes: int. Number of classes.
@@ -306,7 +301,7 @@ class FPNMask(nn.Module):
         self.mask_pool_size = mask_pool_size
         self.image_shape = image_shape
         self.num_classes = n_classes + 1
-        self.pyramid_roi_align = PyramidROIAlign(mask_pool_size, image_shape)
+        self.pyramid_roi_align = PyramidROIAlign(mask_pool_size, image_shape, p4_box_size)
         # visualization feature map
         self.vfm = {}
 

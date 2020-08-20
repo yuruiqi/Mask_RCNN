@@ -79,6 +79,8 @@ def generate_coco_h5(coco_dir, dataType, cat_names, save_dir):
         boxes = transform_norm_coco_bbox(boxes, img_shape=I.shape[-2:])
         masks = np.stack([coco.annToMask(x) for x in anns], axis=0)
         class_ids = np.stack([category_dict[x['category_id']] for x in anns], axis=0)
+        if class_ids.shape[0]>max_instances:
+            print(class_ids.shape)
 
         # pad
         if len(boxes) < max_instances:
@@ -127,12 +129,12 @@ def transform(images, size):
 
 
 class COCODataset(Dataset):
-    def __init__(self, set_dir):
+    def __init__(self, set_dir, img_shape):
         # self.data = np.array([os.path.join(set_dir, x) for x in os.listdir(set_dir)])
         self.data_paths = [os.path.join(set_dir, x) for x in sorted(os.listdir(set_dir))]
+        self.img_shape = img_shape
 
     def __getitem__(self, index):
-        img_shape = [512, 512]
         data_h5 = h5py.File(str(self.data_paths[index]), 'r')
 
         img = data_h5['image'].value
@@ -140,8 +142,8 @@ class COCODataset(Dataset):
         boxes = data_h5['boxes'].value
         masks = data_h5['rois'].value
 
-        img = transform_graph(img, img_shape)
-        masks = transform(masks[:, np.newaxis, ...], img_shape).squeeze(axis=1)
+        img = transform_graph(img, self.img_shape)
+        masks = transform(masks[:, np.newaxis, ...], self.img_shape).squeeze(axis=1)
 
         data_h5.close()
 
@@ -154,7 +156,11 @@ class COCODataset(Dataset):
 
 if __name__ == '__main__':
     coco_dir = '/home/yuruiqi/PycharmProjects/COCOData'
-    dataType = 'train2017'
-    save_dir = '/home/yuruiqi/PycharmProjects/COCOData_mrcnn/train2017_cat_dog'
+    # dataType = 'train2017'
+    # save_dir = '/home/yuruiqi/PycharmProjects/COCOData_mrcnn/train2017_cat_dog'
+    # dataType = 'val2017'
+    # save_dir = '/home/yuruiqi/PycharmProjects/COCOData_mrcnn/val2017_cat_dog'
+    dataType = 'test2017'
+    save_dir = '/home/yuruiqi/PycharmProjects/COCOData_mrcnn/test2017_cat_dog'
 
     generate_coco_h5(coco_dir, dataType, ['cat', 'dog'], save_dir)

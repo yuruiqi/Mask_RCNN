@@ -2,10 +2,8 @@ import torch
 import torch.nn as nn
 
 from model import Utils
-from model.LossFunction import compute_loss, compute_rpn_loss, compute_head_loss
 from model.NetworkLayers import ResNet50, ResNetPyTorch, FPN, RPN, FPNClassifier, FPNMask
 from model.FunctionLayers import ProposalLayer, DetectionTargetLayer, DetectionLayer
-from model.Visualization import Observer, visualize_rpn_targets
 
 import numpy as np
 import os
@@ -15,19 +13,26 @@ grads = Utils.GradSaver()
 
 # Mask R-CNN
 class MRCNN(nn.Module):
-    def __init__(self, in_channels, image_shape, n_classes, mode, pretrain=True):
+    def __init__(self, image_shape, n_classes, scales=(32, 64, 128, 256, 512), ratios=(0.5, 1, 2),
+                 p4_box_size=224.0, mode='train', pretrain=True):
         # TODO: in_channels
         super().__init__()
         self.mode = mode
         self.image_shape = image_shape
         self.n_classes = n_classes
 
-        self.scales = [32, 64, 128, 256, 512]
-        self.ratios = [0.5, 1, 2]
-        self.anchor_genertor = Utils.AnchorGenerator(scales=self.scales, ratios=self.ratios)
-        self.anchor_per_location = len(self.ratios)
+        # to 256*256 img, box is mostly from 20 to 80.
+        # If stride is [4, 8, 16, 32, 64], then hope box 24 apply to P4(stride 16) with feature map size about 3.
+        self.anchor_per_location = len(ratios)
 
-        self.anchors = None
+        # default for resnet50
+        feature_strides = [4, 8, 16, 32, 64]
+        # if image size is 256, pyramid shapes is [[64,64], [32,32], [16,16], [8,8], [4,4]]
+        pyramid_shapes = [np.array(image_shape)/x for x in feature_strides]
+        # anchors = self.anchor_genertor.get_anchors(pyramid_shapes, feature_strides)
+        anchors = Utils.generate_pyramid_anchors(scales, ratios, pyramid_shapes, feature_strides, 1)
+        self.anchors = Utils.norm_boxes(anchors, image_shape=image_shape)  # (n_anchors, 4)
+
         self.gt_class_ids = None
         self.gt_boxes = None
         self.gt_masks = None
@@ -39,19 +44,17 @@ class MRCNN(nn.Module):
         # self.resnet = ResNet50(in_channels, 2048)
         # TODO: channel
         self.resnet = ResNetPyTorch(pretrained=pretrain)
-
         self.fpn = FPN(2048, 256)
         self.rpn = RPN(256, anchors_per_location=self.anchor_per_location)
 
-        self.proposal_layer = ProposalLayer(post_nms_rois=300, nms_threshold=0.8, pre_nms_limit=500)
-        self.detection_target_layer = None
+        self.proposal_layer = ProposalLayer(post_nms_rois=50, nms_threshold=0.7, pre_nms_limit=100)
+        self.detection_target_layer = DetectionTargetLayer(proposal_positive_ratio=0.33, train_proposals_per_image=30,
+                                                           mask_shape=[28, 28], positive_iou_threshold=0.5)
         self.detection_layer = DetectionLayer(detection_max_instances=3, detection_nms_threshold=0.3)
         # in channel = fpn out channel, out channel = num_classes
-        self.fpn_classifier = FPNClassifier(256, n_classes, fc_layers_size=1024, pool_size=7, image_shape=image_shape)
-        self.fpn_mask = FPNMask(256, n_classes, mask_pool_size=14, image_shape=image_shape)
-
-        # Get when forwarding.
-        self.anchors = None  # (batch, n_anchors, 4). Same among batch so don't need batch dim.
+        self.fpn_classifier = FPNClassifier(256, n_classes, fc_layers_size=1024, pool_size=7, image_shape=image_shape,
+                                            p4_box_size=p4_box_size)
+        self.fpn_mask = FPNMask(256, n_classes, mask_pool_size=14, image_shape=image_shape, p4_box_size=p4_box_size)
 
     def forward(self, x):
         """
@@ -101,19 +104,25 @@ class MRCNN(nn.Module):
         # e.g. every logits's shape is (batch, n_anchors, 2).
         rpn_logits, rpn_scores, rpn_bboxes = [torch.cat(x, dim=1) for x in outputs]
 
-        # pyramid shape is [batch, channels, h, w]. So take last 2 as shape.
-        pyramid_shapes = [[x.shape[-2], x.shape[-1]] for x in rpn_feature_maps]
-        # TODO: It should be confirmed.
-        feature_strides = [4, 8, 16, 32, 64]
-        # generate anchors
-        self.generate_anchors(pyramid_shapes, feature_strides, p2.shape[0], device=rpn_bboxes.device)
+        # [anchor_counts, 4] to [batch, anchor_counts, 4]
+        anchors = np.broadcast_to(self.anchors, (x.shape[0],) + self.anchors.shape)
+        anchors = torch.tensor(anchors, dtype=torch.float32, device=x.device)
+        # TODO: should self.anchors have batch dim
+        # self.anchors = anchors
+
         # 4. Proposal Layer
-        rpn_rois = self.proposal_layer.process(self.anchors, rpn_scores, rpn_bboxes)
+        # print(rpn_scores[...,1].gt(0.5).nonzero().shape[0])
+        rpn_rois = self.proposal_layer.process(anchors, rpn_scores, rpn_bboxes)
         self.vfm.update(self.proposal_layer.vfm)
         self.vfm['rpn_rois'] = rpn_rois
 
-        # return None, None, None, None
-        # 5. Train or Inference
+        # observer = Observer(x, self.gt_boxes, self.gt_class_ids, self.gt_masks, '/home/yuruiqi/visualization')
+        # observer.show_boxes_filt(channel=0, boxes=rpn_rois, score=self.vfm['rpn_scores'], threshold=0.5,
+        #                          save_dir=r'/home/yuruiqi/visualization/rpn')
+
+        # 5. Train or Inference or RPN
+        if self.mode == 'RPN':
+            return rpn_logits, rpn_scores, rpn_bboxes, None, None, None, None, None, None, None, anchors
         if self.mode == 'train':
             # TODO: Should reduce train_proposals_per_image to around 200. Set to 500 to avoid error when debugging.
             # DetectionTargetLayer
@@ -145,7 +154,7 @@ class MRCNN(nn.Module):
 
             return rpn_logits, rpn_scores, rpn_bboxes, \
                    mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask, \
-                   target_class_ids, target_bbox, target_mask
+                   target_class_ids, target_bbox, target_mask, anchors
         else:
             # Network Heads
             mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.fpn_classifier(rpn_rois, mrcnn_feature_maps)
@@ -165,187 +174,31 @@ class MRCNN(nn.Module):
 
             return detection_boxes, detection_classes, detection_scores, mrcnn_masks
 
-    def generate_anchors(self, pyramid_shapes, feature_strides, batch_size, device):
-        """
-        pyramid_shapes: [p2.shape, ...]. Maybe [[64, 64], [32, 32], [16, 16], [8, 8], [4, 4]]
-        feature_strides: Default to be [4, 8, 16, 32, 64].
-        batch_size: int.
-        device: The device to put anchors into.
 
-        return: (batch, n_anchors, 4)
-        """
-        # anchors = self.anchor_genertor.get_anchors(pyramid_shapes, feature_strides)
-        anchors = Utils.generate_pyramid_anchors(self.scales, self.ratios, pyramid_shapes, feature_strides, 1)
-        anchors = Utils.norm_boxes(anchors, image_shape=self.image_shape)
-        # [anchor_counts, 4] to [batch, anchor_counts, 4]
-        anchors = np.broadcast_to(anchors, (batch_size,) + anchors.shape)
-        anchors = torch.tensor(anchors, dtype=torch.float32, device=device)
-        self.anchors = anchors
+def set_trainable(model, train_parts, train_bn=True):
+    """
+    train_part: list of 'Backbone' or 'RPN' or 'FPN_heads' or 'Heads'
+    """
+    if model.__class__.__name__ == 'DataParallel':
+        model = model.module
+    dict = {'Backbone': (model.resnet,), 'RPN': (model.fpn, model.rpn),
+            'FPN_heads': (model.fpn, model.fpn_classifier, model.fpn_mask),
+            'Heads': (model.fpn, model.rpn, model.fpn_classifier, model.fpn_mask)}
 
-    def build_rpn_targets(self, anchors, gt_boxes, rpn_train_anchors_per_image):
-        """Given the anchors and GT boxes, compute overlaps and identify positive
-        anchors and deltas to refine them to match their corresponding GT boxes.
-        Note that only the anchor whose match is 1 or -1 has bbox. Others are zero paddings.
+    if not train_bn:
+        def set_bn_eval(m):
+            classname = m.__class__.__name__
+            if classname.find('BatchNorm') != -1:
+                m.eval()
 
-        anchors: (n_anchors, [y1, x1, y2, x2])
-        gt_class_ids: (n_classes)
-        gt_boxes: (n_classes, [y1, x1, y2, x2])
+        model.apply(set_bn_eval)
 
-        TODO: Note that it's written mistakenly in the original code.
-        rpn_match: (n_anchors). Matches between anchors and GT boxes. 1 = positive anchor, -1 = negative anchor, 0 = neutral
-        rpn_bbox: (n_anchors, [dy, dx, log(dh), log(dw)]). Anchor bbox deltas.
-        """
-        # Added by myself. Eliminate zero padding gt boxes. So rpn_targets will not regress to there.
-        gt_boxes, _ = Utils.trim_zero_graph(gt_boxes)
+    # Set all to not train
+    for para in model.parameters():
+        para.requires_grad = False
 
-        # Set all to neutral first.
-        rpn_match = torch.zeros([anchors.shape[0]], dtype=torch.int16)  # (n_anchors)
-        rpn_bbox = torch.zeros((anchors.shape[0], 4))  # (n_anchors, [dy, dx, log(dh), log(dw)])
-
-        overlaps = Utils.compute_overlaps(anchors, gt_boxes)  # (n_anchors, n_classes)
-
-        # Match anchors to GT boxes
-        # If an anchor overlaps a GT box with IoU >= 0.7 then it's positive(1).
-        # If an anchor overlaps a GT box with IoU < 0.3 then it's negative(-1).
-        # Neutral(0) anchors are those that don't match the conditions above, and they don't influence the loss function.
-        # However, don't keep any GT box unmatched (rare, but happens).
-        # Instead, match it to the closest anchor (even if its max IoU is < 0.3).
-
-        # 1. Get matched IoU and index of the anchors. Set negative anchors.
-        # TODO: Pytorch bug
-        if overlaps.shape[1] == 1:
-            anchor_iou_argmax = torch.zeros(overlaps.shape[0], dtype=torch.int64, device=overlaps.device)
-        else:
-            anchor_iou_argmax = torch.argmax(overlaps, dim=1)  # (n_anchors), best matched gt_boxes of every anchor.
-
-        anchor_iou_max = torch.max(overlaps, dim=1)[0]  # (n_anchors), best matched overlaps of every anchor.
-        rpn_match[anchor_iou_max < 0.3] = -1
-        # 2. Set an anchor for each GT box (regardless of IoU value).
-        # If multiple anchors have the same IoU, then match all of them.
-        # index of all best anchors to gt boxes.
-        gt_iou_argmax = torch.nonzero(overlaps == torch.max(overlaps, dim=0)[0])[:, 0]
-        rpn_match[gt_iou_argmax] = 1
-        # 3. Set anchors with high overlap as positive. TODO: 0.7 maybe to high???
-        rpn_match[anchor_iou_max >= 0.7] = 1
-
-        # Subsample to balance positive and negative anchors.
-        # 1. Don't let positives be more than half the anchors.
-        # TODO: 1.Why?     2. Need to use torch instead of np?
-        ids = np.where(rpn_match == 1)[0]  # (n_positive)
-        extra = len(ids) - rpn_train_anchors_per_image // 2
-        if extra > 0:
-            # Reset the extra ones to neutral randomly.
-            ids = np.random.choice(ids, extra, replace=False)
-            rpn_match[ids] = 0
-
-        # 2. Don't let negatives be more than (anchors - positives).
-        ids = np.where(rpn_match == -1)[0]
-        extra = len(ids) - (rpn_train_anchors_per_image - torch.sum(rpn_match == 1)).cpu().detach().numpy()
-        if extra > 0:
-            # Rest the extra ones to neutral randomly.
-            ids = np.random.choice(ids, extra, replace=False)
-            rpn_match[ids] = 0
-
-        #  First compute deltas to the corresponding GT boxes.
-        not_positive_ids = torch.ne(rpn_match, 1)
-        anchor_gt_boxes = torch.index_select(gt_boxes, dim=0, index=anchor_iou_argmax)
-        rpn_bbox = Utils.compute_deltas(anchors, anchor_gt_boxes)
-        # TODO: Must do this?
-        # Then set not positive anchors' deltas to zero.
-        rpn_bbox[not_positive_ids] = 0
-
-        return rpn_match, rpn_bbox
-
-    def get_rpn_targets(self, rpn_train_anchors_per_image=256):
-        """
-        Get rpn targets.
-
-        rpn_train_anchors_per_image: int. Num of anchors to get bbox. The left are zero padding.
-
-        return:
-            rpn_match: (batch, n_anchors). Matches between anchors and GT boxes.
-                       1 = positive anchor, -1 = negative anchor, 0 = neutral
-            rpn_bbox: (batch, n_anchors, [dy, dx, log(dh), log(dw)]). Anchor bbox deltas.
-        """
-        # add batch dim
-        rpn_train_anchors_per_image = [rpn_train_anchors_per_image] * self.anchors.shape[0]
-        rpn_match, rpn_bbox = Utils.batch_slice(
-            [self.anchors, self.gt_boxes, rpn_train_anchors_per_image], self.build_rpn_targets)
-
-        rpn_match = rpn_match.to(rpn_bbox.device)
-        return rpn_match, rpn_bbox
-
-    def set_train_gt(self, gt_class_ids, gt_boxes, gt_masks):
-        self.gt_class_ids = gt_class_ids
-        self.gt_boxes = gt_boxes
-        self.gt_masks = gt_masks
-
-        self.active_class_ids = Utils.get_active_class_ids(gt_class_ids, self.n_classes)
-
-        self.detection_target_layer = DetectionTargetLayer(gt_class_ids, gt_boxes, gt_masks,
-                                                           proposal_positive_ratio=0.5, train_proposals_per_image=100,
-                                                           mask_shape=[28, 28])
-
-    def set_trainable(self, train_parts, train_bn=True):
-        """
-        train_part: list of 'Backbone' or 'RPN' or 'FPN_heads' or 'Heads'
-        """
-        dict = {'Backbone': (self.resnet,), 'RPN': (self.fpn, self.rpn),
-                'FPN_heads': (self.fpn, self.fpn_classifier, self.fpn_mask),
-                'Heads': (self.fpn, self.rpn, self.fpn_classifier, self.fpn_mask)}
-
-        if not train_bn:
-            def set_bn_eval(m):
-                classname = m.__class__.__name__
-                if classname.find('BatchNorm') != -1:
-                    m.eval()
-
-            self.apply(set_bn_eval)
-
-        # Set all to not train
-        for para in self.parameters():
-            para.requires_grad = False
-
-        for train_name in train_parts:
-            part = dict[train_name]
-            for net in part:
-                for para in net.parameters():
-                    para.requires_grad = True
-
-    def train_part(self, images, gt_class_ids, gt_boxes, gt_masks, part=None):
-        self.set_train_gt(gt_class_ids, gt_boxes, gt_masks)
-
-        # get pred and label
-        rpn_logits, rpn_scores, rpn_bboxes, \
-        mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask, \
-        target_class_ids, target_bbox, target_mask = self(images)
-
-        target_rpn_match, target_rpn_bbox = self.get_rpn_targets()
-
-        # visualize amchors and target boxes and masks
-        # observer = Observer(images, gt_boxes, gt_class_ids, gt_masks, '/home/yuruiqi/visualization')
-        # observer.show_boxes(channel=0, boxes=self.anchors, save_dir=r'/home/yuruiqi/visualization/anchor')
-
-        # observer.show_boxes_filt(channel=0,boxes=self.anchors,
-        #                          match=target_rpn_match, save_dir=r'/home/yuruiqi/visualization/anchor')
-        # observer.show_boxes_filt(channel=0, boxes=Utils.batch_slice([self.anchors, target_rpn_bbox], Utils.refine_boxes),
-        #                          match=target_rpn_match, save_dir=r'/home/yuruiqi/visualization/target_rpn_box')
-
-        # Visualization.visualize_target_mask(target_mask, save_dir='/home/yuruiqi/visualization/target_mask/')
-
-        # Compute Loss
-        if part == 'RPN':
-            loss, loss_dict = compute_rpn_loss(rpn_logits, rpn_bboxes,
-                                                            target_rpn_match, target_rpn_bbox)
-        elif part == 'FPN_heads':
-            loss, loss_dict = compute_head_loss(mrcnn_class_logits, mrcnn_bbox, mrcnn_mask,
-                                                             target_class_ids, target_bbox, target_mask,
-                                                             self.active_class_ids)
-        elif part == 'Heads':
-            loss, loss_dict = compute_loss(rpn_logits, rpn_bboxes, target_rpn_match, target_rpn_bbox,
-                                                        mrcnn_class_logits, mrcnn_bbox, mrcnn_mask,
-                                                        target_class_ids, target_bbox, target_mask,
-                                                        self.active_class_ids)
-        else:
-            raise ValueError("Rua")
-        return loss, loss_dict
+    for train_name in train_parts:
+        part = dict[train_name]
+        for net in part:
+            for para in net.parameters():
+                para.requires_grad = True

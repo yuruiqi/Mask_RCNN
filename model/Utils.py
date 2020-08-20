@@ -412,33 +412,13 @@ def compute_iou(box1, box2):
     return iou
 
 
-# Get rpn targets (Not used yet)
-def compute_backbone_shapes(backbone_name, image_shape, feature_strides=[4, 8, 16, 32, 64]):
+def compute_backbone_shapes(backbone_name, image_shape, feature_strides=(4, 8, 16, 32, 64)):
     # Currently supports ResNet50 only
     assert backbone_name in ["resnet50"]
 
     pyramid_shapes = [[int(math.ceil(image_shape[0] / stride)), int(math.ceil(image_shape[1] / stride))]
                       for stride in feature_strides]
     return pyramid_shapes
-
-
-def get_active_class_ids(gt_class_ids, n_classes):
-    """
-
-    gt_class_ids: (batch, max_instances). From 1 to n_class. Have zero-padding.
-    n_classes: int.
-
-    return: (batch, num_classes)
-            Note: num_classes includes background.
-    """
-    array = torch.zeros([gt_class_ids.shape[0], n_classes+1], dtype=torch.int32, device=gt_class_ids.device)
-
-    # trim zero-padding
-    ix = gt_class_ids.gt(0).nonzero()
-    ix_fill = torch.stack([ix[:, 0], (gt_class_ids[ix[:, 0], ix[:, 1]]).to(torch.int64)], dim=1)
-    array[ix_fill[:, 0], ix_fill[:, 1]] = torch.tensor(1, dtype=torch.int32, device=gt_class_ids.device)
-
-    return array
 
 
 class GradSaver:
